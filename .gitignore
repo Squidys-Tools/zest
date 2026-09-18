@@ -1,0 +1,13 @@
+/target/
+Cargo.lock
+*.pdb
+*.exe
+*.msi
+*.wixpdb
+.vs/
+.idea/
+*.code-workspace
+# Per-user install output / local settings
+/Zest-local/
+# egui / winit caches
+*.log

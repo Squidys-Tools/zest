@@ -1,0 +1,12 @@
+[package]
+name = "zest-settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zest-core.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+eframe.workspace = true

@@ -1,0 +1,11 @@
+<!-- WiX v4+ MSI placeholder (per-user %LOCALAPPDATA%\Zest, no elevation).
+     Packaging lands in the final milestone. Requires WiX Toolset v4+:
+       dotnet tool install --global wix
+     Then: cargo build --release -p zest-app && wix build wix/Product.wxs -->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Zest" Version="0.1.0" Manufacturer="Zest Contributors"
+           UpgradeCode="PUT-GUID-HERE" Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer version is installed." />
+    <!-- TODO(package): Files (zest.exe, ffmpeg.exe), tray autostart, PATH-free layout -->
+  </Package>
+</Wix>

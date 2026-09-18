@@ -1,0 +1,25 @@
+[package]
+name = "zest-convert"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+zest-core.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+csv.workspace = true
+quick-xml.workspace = true
+image.workspace = true
+resvg.workspace = true
+zip.workspace = true
+tar.workspace = true
+flate2.workspace = true
+tracing.workspace = true
+directories.workspace = true
