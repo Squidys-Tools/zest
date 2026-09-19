@@ -39,10 +39,18 @@ cargo run -p zest-app -- --settings
 
 Settings persist to `%LOCALAPPDATA%\Zest\settings.json`.
 
-## Milestones (from PRD)
+## Documentation
 
-1. Prove `zest-selection` COM resolver on Win10 + Win11 (tabs, Desktop, virtual folders).
-2. Tray + hotkey + transparent overlay drawing a static circle.
-3. Interactive radial menu (sectors, hit-test, ring expansion, ~200ms ease-out).
-4. Engines one at a time: images → media → archives → text. Settings in parallel.
-5. Polish: toasts, errors, DPI, edge cases. Then MSI + auto-update.
+Full docs live in [docs/](docs/README.md). There is no docs site yet.
+
+- [Install Zest](docs/user/install.md)
+- [First run](docs/user/first-run.md)
+- [Converting files](docs/user/converting.md)
+- [Archives](docs/user/archives.md)
+- [Settings](docs/user/settings.md)
+- [Hotkey](docs/user/hotkey.md)
+- [Updating](docs/user/updating.md)
+- [Troubleshooting](docs/user/troubleshooting.md)
+- [Roadmap](docs/ROADMAP.md)
+
+Building from source? Start at [docs/operations/development.md](docs/operations/development.md).
