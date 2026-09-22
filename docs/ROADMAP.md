@@ -13,7 +13,7 @@ Windows updates. Nothing else matters until this works.
       `SelectedItems()` → filesystem paths (`zest-selection::resolve`).
 - [ ] Win11 tabbed Explorer: resolve the active tab, not just the window.
 - [x] Desktop as a special shell view (`Progman` / `WorkerW`).
-- [ ] Gracefully decline virtual folders (Recycle Bin, This PC, `::` paths).
+- [x] Gracefully decline virtual folders (Recycle Bin, This PC, `::` paths).
 - [ ] Verify on Win10 and Win11.
 
 Exit: hotkey in a real Explorer window reliably yields the selected paths;

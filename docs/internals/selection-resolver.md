@@ -29,8 +29,9 @@ or `WorkerW`; the same native selection read then yields filesystem paths.
 - **Desktop:** there is no Explorer HWND. Query the `Progman` / `WorkerW`
   shell view instead.
 - **Virtual folders:** Recycle Bin, This PC, and similar locations expose
-  `::`-style paths with no filesystem target. Reject them gracefully (no menu,
-  no error dialog).
+  `::`-style paths with no filesystem target. Filter them from mixed
+  selections; if nothing filesystem-backed remains, return `VirtualFolder` so
+  the caller declines without showing a menu or error dialog.
 - **Semi-documented COM:** the automation chain works but Microsoft can shift
   Explorer internals across major Windows updates. Prove this on Win10 and
   Win11 first, before any other milestone, and keep the `resolve_mock` test

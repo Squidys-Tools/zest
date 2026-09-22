@@ -4,6 +4,7 @@
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use zest_core::{categories_for_selection, Selection, Settings};
+use zest_selection::SelectionError;
 
 #[derive(Debug, Parser)]
 #[command(name = "zest", about = "Radial file converter (scaffold)")]
@@ -56,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
 async fn check_selection() -> anyhow::Result<()> {
     match zest_selection::resolve() {
         Ok(sel) => print_menu(&sel),
+        Err(SelectionError::VirtualFolder) => {
+            tracing::info!("selection is a virtual folder; no menu to show");
+            Ok(())
+        }
         Err(e) => {
             tracing::warn!("{e}; showing mock example (single PNG)");
             print_menu(&Selection::new(vec!["photo.png".into()]))?;

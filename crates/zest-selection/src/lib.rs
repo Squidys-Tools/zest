@@ -27,23 +27,23 @@ pub enum SelectionError {
 }
 
 pub fn is_virtual_folder(path: &str) -> bool {
-    let p = path.to_ascii_lowercase();
-    p.starts_with("::") || p.contains("recycle") || p == "this pc" || p.starts_with("shell:::")
+    let p = path.trim().to_ascii_lowercase().replace('/', "\\");
+    let leaf = p.rsplit('\\').next().unwrap_or(&p);
+
+    p.starts_with("::")
+        || p.starts_with("shell:::")
+        || matches!(p.as_str(), "this pc" | "recycle bin")
+        || matches!(leaf, "recycle bin" | "$recycle.bin")
 }
 
 /// Test seam: build a Selection from explicit paths (bypasses COM).
 pub fn resolve_mock(paths: Vec<PathBuf>) -> Result<Selection, SelectionError> {
-    if paths.is_empty() {
-        return Err(SelectionError::Empty);
-    }
-    for p in &paths {
-        if let Some(s) = p.to_str() {
-            if is_virtual_folder(s) {
-                return Err(SelectionError::VirtualFolder);
-            }
-        }
-    }
-    Ok(Selection::new(paths))
+    let saw_items = !paths.is_empty();
+    let paths = paths
+        .into_iter()
+        .filter(|path| path.to_str().map_or(true, |s| !is_virtual_folder(s)))
+        .collect();
+    finish_selection(saw_items, paths)
 }
 
 /// Real entry point used by `zest-app` on hotkey.
@@ -839,11 +839,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_virtual_folders() {
-        assert!(is_virtual_folder(
-            "::{645FF040-5081-101B-9F08-00AA002F954E}"
+    fn identifies_virtual_folder_paths_without_rejecting_real_names() {
+        for path in [
+            "::{645FF040-5081-101B-9F08-00AA002F954E}",
+            "shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}",
+            "This PC",
+            "Recycle Bin",
+            r"C:\Users\me\Desktop\$Recycle.Bin",
+        ] {
+            assert!(is_virtual_folder(path), "expected virtual: {path}");
+        }
+
+        for path in [
+            r"C:\Users\me\recycle-notes.txt",
+            r"C:\Users\me\recycle\notes.txt",
+            r"C:\Users\me\photo.png",
+        ] {
+            assert!(!is_virtual_folder(path), "expected filesystem path: {path}");
+        }
+    }
+
+    #[test]
+    fn resolve_mock_filters_virtual_items_but_keeps_files() {
+        let files = resolve_mock(vec![
+            PathBuf::from("::{645FF040-5081-101B-9F08-00AA002F954E}"),
+            PathBuf::from(r"C:\Users\me\photo.png"),
+        ])
+        .unwrap()
+        .files;
+        assert_eq!(files, vec![PathBuf::from(r"C:\Users\me\photo.png")]);
+
+        assert!(matches!(
+            resolve_mock(vec![PathBuf::from("This PC")]),
+            Err(SelectionError::VirtualFolder)
         ));
-        assert!(resolve_mock(vec![]).is_err());
+        assert!(matches!(resolve_mock(vec![]), Err(SelectionError::Empty)));
     }
 
     #[test]
