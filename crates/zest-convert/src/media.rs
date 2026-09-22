@@ -34,7 +34,11 @@ pub async fn convert(job: &Job, settings: &Settings) -> Result<std::path::PathBu
             return Err(ConvertError::FfmpegMissing(ffmpeg.display().to_string()));
         }
     }
-    let _ = (&job.output_ext, &settings.video_preset, settings.audio_bitrate_kbps);
+    let _ = (
+        &job.output_ext,
+        &settings.video_preset,
+        settings.audio_bitrate_kbps,
+    );
     // TODO(MVP-media): build args per preset; GIF path adds
     // `-vf "fps=15,scale=480:-1:flags=lanczos"`.
     Err(ConvertError::NotImplemented(

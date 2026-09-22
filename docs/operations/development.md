@@ -7,6 +7,13 @@
 - FFmpeg is bundled at packaging time; dev machines may use a `PATH` copy.
 - WiX Toolset v4+ only for MSI packaging (`wix/`).
 
+### Target triples
+
+| Target | Status | Notes |
+| --- | --- | --- |
+| `x86_64-pc-windows-msvc` | Default / supported | `cargo build -p zest-app` just works. |
+| `x86_64-pc-windows-gnu` | Supported (see below) | Rust's self-contained MinGW sysroot lacks `libshlwapi.a`; `crates/zest-app/build.rs` adds a vendored import lib (`crates/zest-app/gnu-libs/`) to the link path. You still need `x86_64-w64-mingw32-gcc` on `PATH` (or set `CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER`). |
+
 ## Commands
 
 | Task | Command |

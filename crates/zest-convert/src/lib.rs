@@ -76,9 +76,7 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
         FileKind::Image => image::convert(job, settings).await,
         FileKind::Video | FileKind::Audio => media::convert(job, settings).await,
         FileKind::TextData => text::convert(job, settings).await,
-        FileKind::Archive | FileKind::Folder => {
-            archive::convert_or_extract(job, settings).await
-        }
+        FileKind::Archive | FileKind::Folder => archive::convert_or_extract(job, settings).await,
         FileKind::Other => Err(ConvertError::Unsupported(input_ext, job.output_ext.clone())),
     }
 }

@@ -48,8 +48,7 @@ impl Default for Gradient {
 
 impl Gradient {
     pub fn is_valid(&self) -> bool {
-        (1..=3).contains(&self.0.len())
-            && self.0.iter().all(|c| c.len() == 7 && c.starts_with('#'))
+        (1..=3).contains(&self.0.len()) && self.0.iter().all(|c| c.len() == 7 && c.starts_with('#'))
     }
 }
 
@@ -91,11 +90,7 @@ impl Default for Settings {
 
 impl Settings {
     pub fn config_path() -> Option<PathBuf> {
-        directories::BaseDirs::new().map(|b| {
-            b.data_local_dir()
-                .join("Zest")
-                .join("settings.json")
-        })
+        directories::BaseDirs::new().map(|b| b.data_local_dir().join("Zest").join("settings.json"))
     }
 
     pub fn load() -> Self {

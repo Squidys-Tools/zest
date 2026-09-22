@@ -20,8 +20,8 @@ impl FileKind {
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_ascii_lowercase().as_str() {
             // Images (WIC primary, `image`/`resvg` fallback; SVG input only)
-            "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tiff" | "tif" | "webp" | "heic"
-            | "heif" | "ico" | "svg" => Self::Image,
+            "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tiff" | "tif" | "webp" | "heic" | "heif"
+            | "ico" | "svg" => Self::Image,
             // Video (FFmpeg)
             "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" => Self::Video,
             // Audio (FFmpeg)

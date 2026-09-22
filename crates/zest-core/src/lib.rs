@@ -9,7 +9,7 @@ pub mod naming;
 pub mod settings;
 
 pub use file_kind::FileKind;
-pub use menu::{ActionCategory, categories_for_selection, convert_targets};
+pub use menu::{categories_for_selection, convert_targets, ActionCategory};
 pub use naming::unique_sibling_path;
 pub use settings::{OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset};
 
