@@ -12,8 +12,8 @@ Windows updates. Nothing else matters until this works.
 - [ ] Enumerate `ShellWindows` → match focused Explorer HWND → read
       `SelectedItems()` → filesystem paths (`zest-selection::resolve`).
 - [ ] Win11 tabbed Explorer: resolve the active tab, not just the window.
-- [ ] Desktop as a special shell view (`Progman` / `WorkerW`).
-- [ ] Gracefully decline virtual folders (Recycle Bin, This PC, `::` paths).
+- [x] Desktop as a special shell view (`Progman` / `WorkerW`).
+- [x] Gracefully decline virtual folders (Recycle Bin, This PC, `::` paths).
 - [ ] Verify on Win10 and Win11.
 
 Exit: hotkey in a real Explorer window reliably yields the selected paths;
