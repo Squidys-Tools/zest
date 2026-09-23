@@ -5,6 +5,7 @@
 //! plan is EV code-signing + vendor whitelisting (PRD §What to Watch Out For).
 
 pub mod hotkey;
+pub mod instance;
 pub mod startup;
 pub mod toast;
 pub mod tray;
