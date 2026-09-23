@@ -1,10 +1,14 @@
 //! `zest` binary: tokio runtime wiring tray → hotkey → selection → overlay → convert.
 //! Installs per-user to `%LOCALAPPDATA%\\Zest` (no elevation); single instance.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 use zest_core::{categories_for_selection, Selection, Settings};
+use zest_overlay::Overlay;
 use zest_selection::SelectionError;
+use zest_shell::tray::TrayAction;
 
 #[derive(Debug, Parser)]
 #[command(name = "zest", about = "Radial file converter (scaffold)")]
@@ -16,6 +20,9 @@ struct Cli {
     #[arg(long)]
     settings: bool,
 }
+
+/// At most one settings window at a time (the tray can fire Settings repeatedly).
+static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,10 +42,18 @@ async fn main() -> anyhow::Result<()> {
         return check_selection().await;
     }
 
-    // TODO(MVP-shell): enforce single instance (named mutex) before tray.
-    zest_shell::tray::build()?;
+    // Single instance before tray/hotkey: a second launch no-ops (SQU-26).
+    let _instance = match zest_shell::instance::acquire()? {
+        Some(guard) => guard,
+        None => {
+            tracing::info!("another Zest instance is already running; exiting");
+            return Ok(());
+        }
+    };
+
+    let mut overlay = Overlay::precreate();
+    let mut tray_rx = zest_shell::tray::build()?;
     let _hotkey_id = zest_shell::hotkey::register(&settings.hotkey)?;
-    let _overlay = zest_overlay::Overlay::precreate();
 
     if zest_shell::updater::should_check(settings.update_frequency) {
         match zest_shell::updater::check_now(env!("CARGO_PKG_VERSION")).await {
@@ -48,10 +63,59 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // TODO(MVP): hotkey event loop → on_hotkey().await; tray event loop here.
-    tracing::info!("zest running (scaffold: event loop lands with shell+overlay MVP)");
-    tokio::signal::ctrl_c().await?;
+    tracing::info!("zest running");
+    loop {
+        tokio::select! {
+            action = tray_rx.recv() => match action {
+                Some(TrayAction::Show) => show_overlay(&mut overlay),
+                Some(TrayAction::Settings) => open_settings(),
+                Some(TrayAction::Quit) | None => break,
+            },
+            _ = tokio::signal::ctrl_c() => break,
+        }
+    }
+    tracing::info!("zest exiting");
     Ok(())
+}
+
+/// Tray Show / (future) hotkey path: ring-1 labels for the live selection.
+fn show_overlay(overlay: &mut Overlay) {
+    let labels: Vec<String> = match zest_selection::resolve() {
+        Ok(sel) => {
+            let cats = categories_for_selection(&sel);
+            zest_overlay::ring_labels(&cats)
+        }
+        Err(SelectionError::VirtualFolder) => {
+            tracing::info!("selection is a virtual folder; no menu to show");
+            return;
+        }
+        Err(e) => {
+            tracing::debug!("selection resolve failed ({e}); showing fallback ring");
+            Vec::new()
+        }
+    };
+    let labels = if labels.is_empty() {
+        vec!["Convert".to_string(), "Archive".to_string()]
+    } else {
+        labels
+    };
+    overlay.show(&labels);
+}
+
+/// Open the settings window on its own thread (eframe blocks) without
+/// stacking duplicates when Settings is clicked twice.
+fn open_settings() {
+    if SETTINGS_OPEN.swap(true, Ordering::SeqCst) {
+        tracing::info!("settings window already open");
+        return;
+    }
+    std::thread::spawn(|| {
+        let settings = Settings::load();
+        if let Err(e) = zest_settings::run(settings) {
+            tracing::warn!("settings window: {e:#}");
+        }
+        SETTINGS_OPEN.store(false, Ordering::SeqCst);
+    });
 }
 
 async fn check_selection() -> anyhow::Result<()> {
