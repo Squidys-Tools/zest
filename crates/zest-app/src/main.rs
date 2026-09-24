@@ -51,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let mut overlay = Overlay::precreate();
+    let overlay = Overlay::precreate()?;
     let mut tray_rx = zest_shell::tray::build()?;
     let _hotkey_id = zest_shell::hotkey::register(&settings.hotkey)?;
 
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
     loop {
         tokio::select! {
             action = tray_rx.recv() => match action {
-                Some(TrayAction::Show) => show_overlay(&mut overlay),
+                Some(TrayAction::Show) => show_overlay(&overlay),
                 Some(TrayAction::Settings) => open_settings(),
                 Some(TrayAction::Quit) | None => break,
             },
@@ -79,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 /// Tray Show / (future) hotkey path: ring-1 labels for the live selection.
-fn show_overlay(overlay: &mut Overlay) {
+fn show_overlay(overlay: &Overlay) {
     let labels: Vec<String> = match zest_selection::resolve() {
         Ok(sel) => {
             let cats = categories_for_selection(&sel);
@@ -99,7 +99,9 @@ fn show_overlay(overlay: &mut Overlay) {
     } else {
         labels
     };
-    overlay.show(&labels);
+    if let Err(error) = overlay.show(&labels) {
+        tracing::warn!("overlay show failed: {error:#}");
+    }
 }
 
 /// Open the settings window on its own thread (eframe blocks) without
