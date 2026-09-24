@@ -32,7 +32,7 @@ hotkey (shell) → selection.resolve() (COM) → core::menu_model::rings()
 | zest-core | FileKind, Selection, rings, naming, Settings | serde, anyhow/thiserror |
 | zest-selection | `resolve()` via ShellWindows COM; rejects Recycle Bin/This PC; Win11 tabs + Desktop special-cased | windows (Com, Shell), directories |
 | zest-convert | `dispatch()` → image/media/text/archive modules; ffmpeg presence check; GIF caps; md→pdf simple | image, resvg, tokio(process), compress-tools, serde_*, csv, quick-xml, toml |
-| zest-shell | tray icon, global hotkey (default Shift+F), toast, HKCU Run startup, GitHub Releases updater | tray-icon, global-hotkey, windows (Notifications, Registry), reqwest, semver |
+| zest-shell | tray icon, global hotkeys (default Shift+F; Shift+C opens Convert), toast, HKCU Run startup, GitHub Releases updater | tray-icon, global-hotkey, windows (Notifications, Registry), reqwest, semver |
 | zest-overlay | sector geometry + angle hit-test, 200ms ease-out, acrylic/mica + gradient theme, center thumbnail/count | windows (Direct2D), core theme |
 | zest-settings | eframe/egui form: hotkey recorder, quality, output, theme, font, 1–3 gradient colors, startup, update cadence, lossy-warning toggle | eframe, core Settings |
 | zest-app | clap CLI, single-instance note, tokio main wiring | tokio, clap, tracing |
@@ -45,7 +45,7 @@ Ring 1 (categories, filtered):
 - mixed kinds → Archive only (conversion requires uniform kind)
 
 Ring 2: Convert → formats for that kind; Archive → zip/tar/tar.gz/gzip;
-Extract → destination/confirm. Second hotkey jumps straight to Convert ring.
+Extract → destination/confirm. `Shift+C` jumps straight to the Convert ring.
 
 ## Riskiest first
 

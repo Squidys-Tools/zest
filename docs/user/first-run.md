@@ -10,8 +10,8 @@ hotkey, flick toward the action you want.
    through COM, classifies the files, and draws the radial menu at your cursor.
 3. Ring 1 shows categories: **Convert**, **Archive**, or **Extract**, filtered
    to what makes sense for the selection.
-4. Picking a category replaces the ring with its targets (ring 2). A second
-   hotkey jumps straight to the Convert ring.
+4. Picking a category replaces the ring with its targets (ring 2). Press
+   `Shift+C` to jump straight to the Convert ring.
 5. Click a target. The menu vanishes and the job runs in the background. A
    toast confirms completion.
 
