@@ -144,7 +144,7 @@ fn action_for_event(
 
 #[cfg(windows)]
 fn run_message_loop(
-    _manager: GlobalHotKeyManager,
+    manager: GlobalHotKeyManager,
     menu_id: u32,
     convert_id: Option<u32>,
     action_tx: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
@@ -172,11 +172,12 @@ fn run_message_loop(
             }
         }
     }
+    drop(manager);
 }
 
 #[cfg(not(windows))]
 fn run_message_loop(
-    _manager: GlobalHotKeyManager,
+    manager: GlobalHotKeyManager,
     menu_id: u32,
     convert_id: Option<u32>,
     action_tx: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
@@ -192,6 +193,7 @@ fn run_message_loop(
             }
         }
     }
+    drop(manager);
 }
 
 #[cfg(test)]
