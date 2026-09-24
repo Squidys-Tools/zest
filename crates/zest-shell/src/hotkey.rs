@@ -157,7 +157,14 @@ fn run_message_loop(
         let mut message = MSG::default();
         loop {
             let result = GetMessageW(&mut message, None, 0, 0);
-            if result.0 <= 0 {
+            if result.0 == 0 {
+                break;
+            }
+            if result.0 == -1 {
+                tracing::error!(
+                    error = %std::io::Error::last_os_error(),
+                    "global hotkey message loop failed"
+                );
                 break;
             }
             let _ = TranslateMessage(&message);
