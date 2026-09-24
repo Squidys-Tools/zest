@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const DEFAULT_HOTKEY: &str = "Shift+F";
+pub const DEFAULT_CONVERT_HOTKEY: &str = "Shift+C";
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum OutputLocation {
     BesideOriginal,
@@ -73,7 +76,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            hotkey: "Shift+F".to_string(),
+            hotkey: DEFAULT_HOTKEY.to_string(),
             output: OutputLocation::BesideOriginal,
             jpeg_quality: 90,
             video_preset: VideoPreset::Medium,

@@ -4,9 +4,9 @@ Lightweight Windows tray utility: select files in Explorer, press a hotkey, get 
 radial menu with only the conversions / archive actions that make sense.
 
 > Scaffold status: app architecture, the Phase 0 selection resolver, the tray
-> actions, and the Phase 1 static Direct2D overlay are in place. Conversion
-> engines and the global hotkey listener remain stubbed with explicit
-> `TODO(MVP)` markers in dependency order. See `docs/ARCHITECTURE.md`.
+> actions, the global hotkey listener, and the Phase 1 static Direct2D overlay
+> are in place. Conversion engines remain stubbed with explicit `TODO(MVP)`
+> markers in dependency order. See `docs/ARCHITECTURE.md`.
 
 ## Layout
 

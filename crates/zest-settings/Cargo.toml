@@ -10,3 +10,4 @@ zest-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 eframe.workspace = true
+global-hotkey.workspace = true

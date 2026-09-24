@@ -11,7 +11,10 @@ pub mod settings;
 pub use file_kind::FileKind;
 pub use menu::{categories_for_selection, convert_targets, ActionCategory};
 pub use naming::unique_sibling_path;
-pub use settings::{OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset};
+pub use settings::{
+    OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY,
+    DEFAULT_HOTKEY,
+};
 
 use std::path::PathBuf;
 

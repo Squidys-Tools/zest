@@ -4,10 +4,18 @@
 //! lossy-warning toggle. (Reactor migration is post-MVP.)
 
 use eframe::egui;
-use zest_core::{Settings, Theme, UpdateFrequency, VideoPreset};
+use global_hotkey::hotkey::HotKey;
+use zest_core::{Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY};
 
 pub fn run(settings: Settings) -> anyhow::Result<()> {
-    let app = SettingsApp { settings };
+    run_with_notice(settings, None)
+}
+
+pub fn run_with_notice(settings: Settings, startup_notice: Option<String>) -> anyhow::Result<()> {
+    let app = SettingsApp {
+        settings,
+        startup_notice,
+    };
     eframe::run_native(
         "Zest Settings",
         eframe::NativeOptions::default(),
@@ -19,19 +27,27 @@ pub fn run(settings: Settings) -> anyhow::Result<()> {
 
 struct SettingsApp {
     settings: Settings,
+    startup_notice: Option<String>,
 }
 
 impl eframe::App for SettingsApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let hotkey_error = validate_hotkey(&self.settings.hotkey).err();
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Zest Settings");
             ui.separator();
+            if let Some(notice) = &self.startup_notice {
+                ui.colored_label(egui::Color32::YELLOW, notice);
+            }
 
             ui.horizontal(|ui| {
                 ui.label("Hotkey");
                 ui.text_edit_singleline(&mut self.settings.hotkey);
             });
             ui.label("Press-record lands in MVP (currently type e.g. Shift+F).");
+            if let Some(error) = hotkey_error {
+                ui.colored_label(egui::Color32::RED, error);
+            }
 
             ui.horizontal(|ui| {
                 ui.label("JPEG quality");
@@ -114,11 +130,45 @@ impl eframe::App for SettingsApp {
             );
 
             ui.separator();
-            if ui.button("Save").clicked() {
+            if ui
+                .add_enabled(hotkey_error.is_none(), egui::Button::new("Save"))
+                .clicked()
+            {
                 if let Err(e) = self.settings.save() {
                     tracing::warn!("save failed: {e:#}");
+                } else {
+                    self.startup_notice = None;
                 }
             }
         });
+    }
+}
+
+fn validate_hotkey(value: &str) -> Result<(), &'static str> {
+    let hotkey = value
+        .parse::<HotKey>()
+        .map_err(|_| "Enter a valid shortcut, such as Shift+F.")?;
+    let convert_hotkey = DEFAULT_CONVERT_HOTKEY
+        .parse::<HotKey>()
+        .expect("built-in Convert shortcut is valid");
+    if hotkey == convert_hotkey {
+        return Err("Shift+C is reserved for opening the Convert ring.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_the_default_hotkey() {
+        assert!(validate_hotkey("Shift+F").is_ok());
+    }
+
+    #[test]
+    fn rejects_invalid_and_reserved_hotkeys() {
+        assert!(validate_hotkey("Shift+").is_err());
+        assert!(validate_hotkey(DEFAULT_CONVERT_HOTKEY).is_err());
     }
 }
