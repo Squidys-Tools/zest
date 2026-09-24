@@ -66,32 +66,11 @@ pub fn ring_labels(cats: &[ActionCategory]) -> Vec<String> {
         .collect()
 }
 
-/// Renderer stub: pre-create hidden layered window once, `show()` reveals it.
-pub struct Overlay {
-    visible: bool,
-}
+#[cfg(windows)]
+mod win;
 
-impl Overlay {
-    pub fn precreate() -> Self {
-        // TODO(MVP-overlay): Direct2D factory + transparent layered HWND, hidden.
-        Self { visible: false }
-    }
-
-    pub fn show(&mut self, labels: &[String]) {
-        let _ = layout_sectors(labels);
-        // TODO(MVP-overlay): position at cursor, acrylic blur, gradient sector.
-        self.visible = true;
-        tracing::info!(?labels, "overlay stub: show");
-    }
-
-    pub fn hide(&mut self) {
-        self.visible = false;
-    }
-
-    pub fn is_visible(&self) -> bool {
-        self.visible
-    }
-}
+#[cfg(windows)]
+pub use win::Overlay;
 
 #[cfg(test)]
 mod tests {

@@ -24,7 +24,7 @@ Exit: hotkey in a real Explorer window reliably yields the selected paths;
 - [x] Tray icon with Show / Settings / Quit (`zest-shell::tray`).
 - [ ] Global hotkey listener, default `Shift+F`, plus a second hotkey that
       jumps straight to the Convert ring (`zest-shell::hotkey`).
-- [ ] Transparent layered window that draws a static circle
+- [x] Transparent layered window that draws a static circle
       (`zest-overlay::Overlay::precreate` + Direct2D).
 - [x] Single-instance guard (named mutex) in `zest-app`.
 

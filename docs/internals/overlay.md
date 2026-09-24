@@ -17,15 +17,17 @@ Windows) is the architectural reference.
 
 ## Performance trick
 
-The window is pre-created and hidden (`Overlay::precreate`). Activation only
-reveals and positions it at the cursor — never builds it from scratch. That is
-what makes it feel instant.
+The window is pre-created and hidden (`Overlay::precreate`). A dedicated Win32
+message-loop thread owns the HWND, Direct2D render target, and premultiplied
+BGRA DIB. Activation positions the existing layered surface at the cursor and
+uses `UpdateLayeredWindow`; it never builds the surface from scratch.
 
 ## Testable core
 
 Sector geometry and angle hit-testing (`layout_sectors`, `hit_test`,
 `ring_labels`) are pure logic with unit tests. The Direct2D renderer consumes
-that model and owns only pixels, blur, and animation.
+that model and owns only pixels, blur, and animation. Native precreate,
+activation, and teardown are covered by the overlay crate's Windows test.
 
 ## DPI and edges
 
