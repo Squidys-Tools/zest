@@ -522,79 +522,82 @@ impl NativeOverlay {
         unsafe {
             render_target.BeginDraw();
             render_target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            render_target.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
-            for (index, sector) in self.ring.sectors.iter().enumerate() {
-                let active = self.active_sector == Some(index);
-                let fill = if active {
-                    D2D1_COLOR_F {
-                        r: 1.0,
-                        g: 0.54,
-                        b: 0.24,
-                        a: 0.98,
+            let draw_result = (|| -> Result<()> {
+                render_target.Clear(Some(&D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                }));
+                for (index, sector) in self.ring.sectors.iter().enumerate() {
+                    let active = self.active_sector == Some(index);
+                    let fill = if active {
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 0.54,
+                            b: 0.24,
+                            a: 0.98,
+                        }
+                    } else {
+                        D2D1_COLOR_F {
+                            r: 0.22,
+                            g: 0.24,
+                            b: 0.28,
+                            a: 0.82,
+                        }
+                    };
+                    fill_brush.SetColor(&fill);
+                    stroke_brush.SetColor(&D2D1_COLOR_F {
+                        r: fill.r,
+                        g: fill.g,
+                        b: fill.b,
+                        a: 0.95,
+                    });
+                    if sector.width >= std::f64::consts::TAU - f64::EPSILON {
+                        render_target.FillEllipse(&outer, fill_brush);
+                        render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
+                    } else {
+                        let geometry = self.create_sector_geometry(sector)?;
+                        render_target.FillGeometry(
+                            &geometry,
+                            fill_brush,
+                            None::<&windows::Win32::Graphics::Direct2D::ID2D1Brush>,
+                        );
+                        render_target.DrawGeometry(
+                            &geometry,
+                            stroke_brush,
+                            1.5,
+                            None::<&windows::Win32::Graphics::Direct2D::ID2D1StrokeStyle>,
+                        );
                     }
-                } else {
-                    D2D1_COLOR_F {
-                        r: 0.22,
-                        g: 0.24,
-                        b: 0.28,
-                        a: 0.82,
-                    }
-                };
-                fill_brush.SetColor(&fill);
-                stroke_brush.SetColor(&D2D1_COLOR_F {
-                    r: fill.r,
-                    g: fill.g,
-                    b: fill.b,
-                    a: 0.95,
-                });
-                if sector.width >= std::f64::consts::TAU - f64::EPSILON {
-                    render_target.FillEllipse(&outer, fill_brush);
-                    render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
-                } else {
-                    let geometry = self.create_sector_geometry(sector)?;
-                    render_target.FillGeometry(
-                        &geometry,
-                        fill_brush,
-                        None::<&windows::Win32::Graphics::Direct2D::ID2D1Brush>,
-                    );
-                    render_target.DrawGeometry(
-                        &geometry,
-                        stroke_brush,
-                        1.5,
-                        None::<&windows::Win32::Graphics::Direct2D::ID2D1StrokeStyle>,
-                    );
                 }
-            }
 
-            let mut center_ellipse = D2D1_ELLIPSE::default();
-            center_ellipse.point.X = center;
-            center_ellipse.point.Y = center;
-            center_ellipse.radiusX = super::RING_INNER_RADIUS;
-            center_ellipse.radiusY = super::RING_INNER_RADIUS;
-            fill_brush.SetColor(&D2D1_COLOR_F {
-                r: 0.10,
-                g: 0.10,
-                b: 0.10,
-                a: 0.96,
-            });
-            stroke_brush.SetColor(&D2D1_COLOR_F {
-                r: 1.0,
-                g: 0.54,
-                b: 0.24,
-                a: 1.0,
-            });
-            render_target.FillEllipse(&center_ellipse, fill_brush);
-            render_target.DrawEllipse(&center_ellipse, stroke_brush, 1.5, None);
-            render_target
+                let mut center_ellipse = D2D1_ELLIPSE::default();
+                center_ellipse.point.X = center;
+                center_ellipse.point.Y = center;
+                center_ellipse.radiusX = super::RING_INNER_RADIUS;
+                center_ellipse.radiusY = super::RING_INNER_RADIUS;
+                fill_brush.SetColor(&D2D1_COLOR_F {
+                    r: 0.10,
+                    g: 0.10,
+                    b: 0.10,
+                    a: 0.96,
+                });
+                stroke_brush.SetColor(&D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 0.54,
+                    b: 0.24,
+                    a: 1.0,
+                });
+                render_target.FillEllipse(&center_ellipse, fill_brush);
+                render_target.DrawEllipse(&center_ellipse, stroke_brush, 1.5, None);
+                Ok(())
+            })();
+            let end_result = render_target
                 .EndDraw(None, None)
-                .context("finish overlay Direct2D draw")?;
+                .context("finish overlay Direct2D draw");
+            draw_result.and(end_result)
         }
-        Ok(())
     }
 
     fn present(&self) -> Result<()> {
