@@ -30,7 +30,7 @@ impl FileKind {
             "txt" | "csv" | "json" | "xml" | "yaml" | "yml" | "toml" | "md" | "pdf" => {
                 Self::TextData
             }
-            // Archives (libarchive via `compress-tools`)
+            // Archives (zip/tar/flate2)
             "zip" | "tar" | "tgz" | "gz" => Self::Archive,
             _ => Self::Other,
         }

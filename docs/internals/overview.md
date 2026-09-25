@@ -27,7 +27,7 @@ only theme-relevant fields (font, gradient, dark/light).
 
 ```text
 hotkey (shell) → selection.resolve() → menu model (core)
-  → overlay.show(ring) → user picks leaf → convert::dispatch(job)
+  → overlay.show_with_children(ring) → user picks leaf → convert::dispatch(job)
   → shell::toast done/error
 ```
 

@@ -32,15 +32,15 @@ Exit: press hotkey → circle at cursor; press Esc → gone.
 
 ## Phase 2 — Interactive radial menu
 
-- [ ] Sectors, cursor-angle hit-testing, ring expansion/replacement.
-- [ ] Ring 1 filtering (PNG → Convert+Archive; zip → Extract; mixed → Archive).
-- [ ] Ring 2 fan-out per category; Convert ring via either hotkey path.
+- [x] Sectors, cursor-angle hit-testing, ring expansion/replacement.
+- [x] Ring 1 filtering (PNG → Convert+Archive; zip → Extract; mixed → Archive).
+- [ ] Complete ring 2 fan-out per category and leaf action dispatch; Convert ring via either hotkey path.
 - [ ] ~200ms ease-out sector transitions; gradient active sector (1–3 colors).
 - [ ] Center thumbnail / multi-file count badge; Segoe UI Variable; Lucide icons.
 - [ ] Acrylic/mica blur when available; dark-mode default.
-- [ ] Pre-created hidden window reveal (no build-on-open).
+- [x] Pre-created hidden window reveal (no build-on-open).
 
-Exit: full menu navigable by flick; same action always at the same angle.
+Exit: category selection replaces the current ring; same action always at the same angle.
 
 ## Phase 3 — Image engine (quickest feedback loop)
 

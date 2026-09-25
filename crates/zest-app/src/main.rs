@@ -160,10 +160,15 @@ async fn main() -> anyhow::Result<()> {
 
 /// Tray Show / (future) hotkey path: ring-1 labels for the live selection.
 fn show_overlay(overlay: &Overlay) {
-    let labels: Vec<String> = match zest_selection::resolve() {
+    let (labels, children) = match zest_selection::resolve() {
         Ok(sel) => {
             let cats = categories_for_selection(&sel);
-            zest_overlay::ring_labels(&cats)
+            let labels = zest_overlay::ring_labels(&cats);
+            let children = cats
+                .iter()
+                .map(|category| ring_two_labels(&sel, *category))
+                .collect::<Vec<_>>();
+            (labels, children)
         }
         Err(SelectionError::VirtualFolder) => {
             tracing::info!("selection is a virtual folder; no menu to show");
@@ -171,16 +176,42 @@ fn show_overlay(overlay: &Overlay) {
         }
         Err(e) => {
             tracing::debug!("selection resolve failed ({e}); showing fallback ring");
-            Vec::new()
+            (
+                vec!["Convert".to_string(), "Archive".to_string()],
+                vec![Vec::new(), Vec::new()],
+            )
         }
     };
-    let labels = if labels.is_empty() {
-        vec!["Convert".to_string(), "Archive".to_string()]
+    let (labels, children) = if labels.is_empty() {
+        (
+            vec!["Convert".to_string(), "Archive".to_string()],
+            vec![Vec::new(), Vec::new()],
+        )
     } else {
-        labels
+        (labels, children)
     };
-    if let Err(error) = overlay.show(&labels) {
+    if let Err(error) = overlay.show_with_children(&labels, &children) {
         tracing::warn!("overlay show failed: {error:#}");
+    }
+}
+
+fn ring_two_labels(selection: &Selection, category: ActionCategory) -> Vec<String> {
+    match category {
+        ActionCategory::Convert => selection
+            .files
+            .first()
+            .map(|path| {
+                zest_core::convert_targets(zest_core::file_kind::classify_path(path))
+                    .iter()
+                    .map(|target| (*target).to_string())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ActionCategory::Archive => zest_core::menu::archive_targets()
+            .iter()
+            .map(|target| (*target).to_string())
+            .collect(),
+        ActionCategory::Extract => Vec::new(),
     }
 }
 
