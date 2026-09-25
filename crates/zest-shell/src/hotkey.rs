@@ -2,6 +2,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use global_hotkey::{hotkey::HotKey, GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+#[cfg(windows)]
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 pub use zest_core::{DEFAULT_CONVERT_HOTKEY, DEFAULT_HOTKEY};
 
@@ -16,6 +18,8 @@ pub struct HotkeyListener {
     convert_unavailable_reason: Option<String>,
     #[cfg(windows)]
     thread_id: u32,
+    #[cfg(windows)]
+    thread_running: Arc<Mutex<bool>>,
 }
 
 impl HotkeyListener {
@@ -31,13 +35,34 @@ impl HotkeyListener {
 impl Drop for HotkeyListener {
     fn drop(&mut self) {
         #[cfg(windows)]
-        unsafe {
-            use windows::Win32::{
-                Foundation::{LPARAM, WPARAM},
-                UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT},
+        {
+            let Ok(running) = self.thread_running.lock() else {
+                return;
             };
+            if !*running {
+                return;
+            }
 
-            let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            unsafe {
+                use windows::Win32::{
+                    Foundation::{LPARAM, WPARAM},
+                    UI::WindowsAndMessaging::{PostThreadMessageW, WM_QUIT},
+                };
+
+                let _ = PostThreadMessageW(self.thread_id, WM_QUIT, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct HotkeyThreadStatus(Arc<Mutex<bool>>);
+
+#[cfg(windows)]
+impl Drop for HotkeyThreadStatus {
+    fn drop(&mut self) {
+        if let Ok(mut running) = self.0.lock() {
+            *running = false;
         }
     }
 }
@@ -47,9 +72,15 @@ pub fn register(hotkey_str: &str) -> Result<HotkeyListener> {
 
     let (action_tx, receiver) = unbounded_channel();
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    #[cfg(windows)]
+    let thread_running = Arc::new(Mutex::new(false));
+    #[cfg(windows)]
+    let worker_thread_running = Arc::clone(&thread_running);
     std::thread::Builder::new()
         .name("zest-hotkey".into())
         .spawn(move || {
+            #[cfg(windows)]
+            let _thread_status = HotkeyThreadStatus(Arc::clone(&worker_thread_running));
             let setup = (|| -> Result<(GlobalHotKeyManager, Option<String>)> {
                 let manager = GlobalHotKeyManager::new().context("create global hotkey manager")?;
                 manager
@@ -66,6 +97,12 @@ pub fn register(hotkey_str: &str) -> Result<HotkeyListener> {
                 Ok((manager, convert_error)) => {
                     #[cfg(windows)]
                     let thread_id = current_thread_id();
+                    #[cfg(windows)]
+                    {
+                        *worker_thread_running
+                            .lock()
+                            .expect("hotkey thread status lock poisoned") = true;
+                    }
                     #[cfg(not(windows))]
                     let thread_id = 0;
                     let convert_id = convert_error.is_none().then_some(convert_hotkey.id());
@@ -95,6 +132,8 @@ pub fn register(hotkey_str: &str) -> Result<HotkeyListener> {
         convert_unavailable_reason,
         #[cfg(windows)]
         thread_id,
+        #[cfg(windows)]
+        thread_running,
     })
 }
 
@@ -144,7 +183,7 @@ fn action_for_event(
 
 #[cfg(windows)]
 fn run_message_loop(
-    _manager: GlobalHotKeyManager,
+    manager: GlobalHotKeyManager,
     menu_id: u32,
     convert_id: Option<u32>,
     action_tx: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
@@ -157,7 +196,14 @@ fn run_message_loop(
         let mut message = MSG::default();
         loop {
             let result = GetMessageW(&mut message, None, 0, 0);
-            if result.0 <= 0 {
+            if result.0 == 0 {
+                break;
+            }
+            if result.0 == -1 {
+                tracing::error!(
+                    error = %std::io::Error::last_os_error(),
+                    "global hotkey message loop failed"
+                );
                 break;
             }
             let _ = TranslateMessage(&message);
@@ -172,11 +218,12 @@ fn run_message_loop(
             }
         }
     }
+    drop(manager);
 }
 
 #[cfg(not(windows))]
 fn run_message_loop(
-    _manager: GlobalHotKeyManager,
+    manager: GlobalHotKeyManager,
     menu_id: u32,
     convert_id: Option<u32>,
     action_tx: tokio::sync::mpsc::UnboundedSender<HotkeyAction>,
@@ -192,6 +239,7 @@ fn run_message_loop(
             }
         }
     }
+    drop(manager);
 }
 
 #[cfg(test)]

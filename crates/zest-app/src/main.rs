@@ -143,7 +143,13 @@ async fn main() -> anyhow::Result<()> {
             } => match action {
                 Some(zest_shell::hotkey::HotkeyAction::OpenMenu) => show_overlay(&overlay),
                 Some(zest_shell::hotkey::HotkeyAction::OpenConvert) => show_convert_overlay(&overlay),
-                None => break,
+                None => {
+                    tracing::error!("global hotkey listener stopped; tray actions remain available");
+                    open_settings(Some(
+                        "The global hotkey listener stopped unexpectedly. Tray actions still work; restart Zest to try again.".into(),
+                    ));
+                    hotkey_listener = None;
+                }
             },
             _ = tokio::signal::ctrl_c() => break,
         }
