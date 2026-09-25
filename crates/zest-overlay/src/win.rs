@@ -2,7 +2,7 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, AtomicIsize, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     thread::JoinHandle,
 };
@@ -14,11 +14,16 @@ use windows::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, POINT, RECT, SIZE, WPARAM},
         Graphics::{
             Direct2D::{
-                Common::{D2D1_COLOR_F, D2D1_PIXEL_FORMAT},
-                D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush,
-                D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+                Common::{
+                    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
+                    D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
+                },
+                D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1PathGeometry,
+                ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
+                D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES,
+                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Gdi::{
@@ -28,15 +33,19 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE},
+            Controls::WM_MOUSELEAVE,
+            Input::KeyboardAndMouse::{
+                RegisterHotKey, TrackMouseEvent, UnregisterHotKey, MOD_NOREPEAT, TME_LEAVE,
+                TRACKMOUSEEVENT, VK_ESCAPE,
+            },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
                 GetMessageW, GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassExW,
                 SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW,
                 UpdateLayeredWindow, CREATESTRUCTW, GWLP_USERDATA, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
-                ULW_ALPHA, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_NCCREATE,
-                WM_NCDESTROY, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-                WS_POPUP,
+                ULW_ALPHA, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -44,7 +53,9 @@ use windows::{
 
 use windows::Win32::Graphics::Gdi::AC_SRC_ALPHA;
 
-const OVERLAY_SIZE: i32 = 256;
+use super::{RingModel, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS};
+
+const OVERLAY_SIZE: i32 = OVERLAY_SIZE_F32 as i32;
 const ESCAPE_HOTKEY_ID: i32 = 0x5A57;
 const WM_APP_SHOW: u32 = WM_APP + 1;
 const WM_APP_HIDE: u32 = WM_APP + 2;
@@ -56,18 +67,28 @@ pub struct Overlay {
     thread: Option<JoinHandle<()>>,
     window: Arc<AtomicIsize>,
     visible: Arc<AtomicBool>,
+    pending_model: Arc<Mutex<Option<RingModel>>>,
 }
 
 impl Overlay {
     pub fn precreate() -> Result<Self> {
         let visible = Arc::new(AtomicBool::new(false));
         let window = Arc::new(AtomicIsize::new(0));
+        let pending_model = Arc::new(Mutex::new(None));
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread_visible = Arc::clone(&visible);
         let thread_window = Arc::clone(&window);
+        let thread_pending_model = Arc::clone(&pending_model);
         let thread = std::thread::Builder::new()
             .name("zest-overlay".into())
-            .spawn(move || overlay_thread(thread_visible, thread_window, ready_tx))
+            .spawn(move || {
+                overlay_thread(
+                    thread_visible,
+                    thread_window,
+                    thread_pending_model,
+                    ready_tx,
+                )
+            })
             .context("spawn overlay thread")?;
 
         match ready_rx.recv() {
@@ -86,10 +107,25 @@ impl Overlay {
             thread: Some(thread),
             window,
             visible,
+            pending_model,
         })
     }
 
-    pub fn show(&self, _labels: &[String]) -> Result<()> {
+    pub fn show(&self, labels: &[String]) -> Result<()> {
+        let children = labels.iter().map(|_| Vec::new()).collect::<Vec<_>>();
+        self.show_with_children(labels, &children)
+    }
+
+    pub fn show_with_children(&self, labels: &[String], children: &[Vec<String>]) -> Result<()> {
+        let model = RingModel::new(labels, children)
+            .ok_or_else(|| anyhow!("overlay ring children must match their labels"))?;
+        {
+            let mut pending = self
+                .pending_model
+                .lock()
+                .map_err(|_| anyhow!("overlay model lock poisoned"))?;
+            *pending = Some(model);
+        }
         post(self.hwnd(), WM_APP_SHOW)
     }
 
@@ -127,9 +163,10 @@ fn post(hwnd: HWND, message: u32) -> Result<()> {
 fn overlay_thread(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
+    pending_model: Arc<Mutex<Option<RingModel>>>,
     ready: mpsc::SyncSender<Result<()>>,
 ) {
-    match run_overlay(visible, window, &ready) {
+    match run_overlay(visible, window, pending_model, &ready) {
         Ok(()) => {}
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -140,13 +177,14 @@ fn overlay_thread(
 fn run_overlay(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
+    pending_model: Arc<Mutex<Option<RingModel>>>,
     ready: &mpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
     let instance = unsafe { GetModuleHandleW(None) }.context("get overlay module handle")?;
     let instance = HINSTANCE(instance.0);
     register_class(instance)?;
 
-    let state = match NativeOverlay::new(Arc::clone(&visible), Arc::clone(&window)) {
+    let state = match NativeOverlay::new(Arc::clone(&visible), Arc::clone(&window), pending_model) {
         Ok(state) => state,
         Err(error) => {
             unregister_class(instance);
@@ -249,16 +287,25 @@ struct NativeOverlay {
     hwnd: HWND,
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
+    pending_model: Arc<Mutex<Option<RingModel>>>,
     memory_dc: windows::Win32::Graphics::Gdi::HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
     old_bitmap: HGDIOBJ,
     _render_target: Option<ID2D1DCRenderTarget>,
     _fill_brush: Option<ID2D1SolidColorBrush>,
     _stroke_brush: Option<ID2D1SolidColorBrush>,
+    factory: ID2D1Factory,
+    ring: RingModel,
+    active_sector: Option<usize>,
+    origin: Option<POINT>,
 }
 
 impl NativeOverlay {
-    fn new(visible: Arc<AtomicBool>, window: Arc<AtomicIsize>) -> Result<Self> {
+    fn new(
+        visible: Arc<AtomicBool>,
+        window: Arc<AtomicIsize>,
+        pending_model: Arc<Mutex<Option<RingModel>>>,
+    ) -> Result<Self> {
         unsafe {
             let memory_dc = CreateCompatibleDC(None);
             if memory_dc.0.is_null() {
@@ -373,43 +420,220 @@ impl NativeOverlay {
                         return Err(error).context("create overlay stroke brush");
                     }
                 };
+            let state = Self {
+                hwnd: HWND(std::ptr::null_mut()),
+                visible,
+                window,
+                pending_model,
+                memory_dc,
+                bitmap,
+                old_bitmap,
+                factory,
+                _render_target: Some(render_target),
+                _fill_brush: Some(fill_brush),
+                _stroke_brush: Some(stroke_brush),
+                ring: RingModel::default(),
+                active_sector: None,
+                origin: None,
+            };
+            state.redraw_surface()?;
+            Ok(state)
+        }
+    }
+
+    fn take_pending_model(&self) -> Option<RingModel> {
+        self.pending_model
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.take())
+    }
+
+    fn track_mouse_leave(&self) {
+        let mut tracking = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: self.hwnd,
+            dwHoverTime: 0,
+        };
+        let _ = unsafe { TrackMouseEvent(&mut tracking) };
+    }
+
+    fn create_sector_geometry(&self, sector: &super::Sector) -> Result<ID2D1PathGeometry> {
+        let start_angle = sector.center - sector.width / 2.0;
+        let end_angle = start_angle + sector.width;
+        let center = OVERLAY_SIZE_F32 / 2.0;
+        let mut center_point = D2D1_ELLIPSE::default().point;
+        center_point.X = center;
+        center_point.Y = center;
+        let mut start_point = D2D1_ELLIPSE::default().point;
+        start_point.X = center + (RING_OUTER_RADIUS * start_angle.cos() as f32);
+        start_point.Y = center + (RING_OUTER_RADIUS * start_angle.sin() as f32);
+        let mut end_point = D2D1_ELLIPSE::default().point;
+        end_point.X = center + (RING_OUTER_RADIUS * end_angle.cos() as f32);
+        end_point.Y = center + (RING_OUTER_RADIUS * end_angle.sin() as f32);
+
+        let geometry =
+            unsafe { self.factory.CreatePathGeometry() }.context("create sector geometry")?;
+        let sink = unsafe { geometry.Open() }.context("open sector geometry sink")?;
+        unsafe {
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            sink.BeginFigure(center_point, D2D1_FIGURE_BEGIN_FILLED);
+            sink.AddLine(start_point);
+            sink.AddArc(&D2D1_ARC_SEGMENT {
+                point: end_point,
+                size: D2D_SIZE_F {
+                    width: RING_OUTER_RADIUS,
+                    height: RING_OUTER_RADIUS,
+                },
+                rotationAngle: 0.0,
+                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                arcSize: if sector.width > std::f64::consts::PI {
+                    D2D1_ARC_SIZE_LARGE
+                } else {
+                    D2D1_ARC_SIZE_SMALL
+                },
+            });
+            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        }
+        unsafe { sink.Close() }.context("close sector geometry sink")?;
+        Ok(geometry)
+    }
+
+    fn redraw_surface(&self) -> Result<()> {
+        let render_target = self
+            ._render_target
+            .as_ref()
+            .ok_or_else(|| anyhow!("overlay render target unavailable"))?;
+        let fill_brush = self
+            ._fill_brush
+            .as_ref()
+            .ok_or_else(|| anyhow!("overlay fill brush unavailable"))?;
+        let stroke_brush = self
+            ._stroke_brush
+            .as_ref()
+            .ok_or_else(|| anyhow!("overlay stroke brush unavailable"))?;
+        let center = OVERLAY_SIZE_F32 / 2.0;
+        let mut outer = D2D1_ELLIPSE::default();
+        outer.point.X = center;
+        outer.point.Y = center;
+        outer.radiusX = RING_OUTER_RADIUS;
+        outer.radiusY = RING_OUTER_RADIUS;
+
+        unsafe {
             render_target.BeginDraw();
+            render_target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             render_target.Clear(Some(&D2D1_COLOR_F {
                 r: 0.0,
                 g: 0.0,
                 b: 0.0,
                 a: 0.0,
             }));
-            let mut ellipse = D2D1_ELLIPSE::default();
-            ellipse.point.X = OVERLAY_SIZE as f32 / 2.0;
-            ellipse.point.Y = OVERLAY_SIZE as f32 / 2.0;
-            ellipse.radiusX = 96.0;
-            ellipse.radiusY = 96.0;
-            render_target.FillEllipse(&ellipse, &fill_brush);
-            render_target.DrawEllipse(&ellipse, &stroke_brush, 2.0, None);
-            if let Err(error) = render_target.EndDraw(None, None) {
-                drop(stroke_brush);
-                drop(fill_brush);
-                drop(render_target);
-                release_dc(memory_dc, old_bitmap, bitmap);
-                return Err(error).context("finish overlay Direct2D draw");
+            for (index, sector) in self.ring.sectors.iter().enumerate() {
+                let active = self.active_sector == Some(index);
+                let fill = if active {
+                    D2D1_COLOR_F {
+                        r: 1.0,
+                        g: 0.54,
+                        b: 0.24,
+                        a: 0.98,
+                    }
+                } else {
+                    D2D1_COLOR_F {
+                        r: 0.22,
+                        g: 0.24,
+                        b: 0.28,
+                        a: 0.82,
+                    }
+                };
+                fill_brush.SetColor(&fill);
+                stroke_brush.SetColor(&D2D1_COLOR_F {
+                    r: fill.r,
+                    g: fill.g,
+                    b: fill.b,
+                    a: 0.95,
+                });
+                if sector.width >= std::f64::consts::TAU - f64::EPSILON {
+                    render_target.FillEllipse(&outer, fill_brush);
+                    render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
+                } else {
+                    let geometry = self.create_sector_geometry(sector)?;
+                    render_target.FillGeometry(
+                        &geometry,
+                        fill_brush,
+                        None::<&windows::Win32::Graphics::Direct2D::ID2D1Brush>,
+                    );
+                    render_target.DrawGeometry(
+                        &geometry,
+                        stroke_brush,
+                        1.5,
+                        None::<&windows::Win32::Graphics::Direct2D::ID2D1StrokeStyle>,
+                    );
+                }
             }
 
-            Ok(Self {
-                hwnd: HWND(std::ptr::null_mut()),
-                visible,
-                window,
-                memory_dc,
-                bitmap,
-                old_bitmap,
-                _render_target: Some(render_target),
-                _fill_brush: Some(fill_brush),
-                _stroke_brush: Some(stroke_brush),
-            })
+            let mut center_ellipse = D2D1_ELLIPSE::default();
+            center_ellipse.point.X = center;
+            center_ellipse.point.Y = center;
+            center_ellipse.radiusX = super::RING_INNER_RADIUS;
+            center_ellipse.radiusY = super::RING_INNER_RADIUS;
+            fill_brush.SetColor(&D2D1_COLOR_F {
+                r: 0.10,
+                g: 0.10,
+                b: 0.10,
+                a: 0.96,
+            });
+            stroke_brush.SetColor(&D2D1_COLOR_F {
+                r: 1.0,
+                g: 0.54,
+                b: 0.24,
+                a: 1.0,
+            });
+            render_target.FillEllipse(&center_ellipse, fill_brush);
+            render_target.DrawEllipse(&center_ellipse, stroke_brush, 1.5, None);
+            render_target
+                .EndDraw(None, None)
+                .context("finish overlay Direct2D draw")?;
         }
+        Ok(())
     }
 
-    fn show(&self) -> Result<()> {
+    fn present(&self) -> Result<()> {
+        let origin = self
+            .origin
+            .ok_or_else(|| anyhow!("overlay origin unavailable"))?;
+        let size = SIZE {
+            cx: OVERLAY_SIZE,
+            cy: OVERLAY_SIZE,
+        };
+        let source = POINT { x: 0, y: 0 };
+        let blend = BLENDFUNCTION {
+            BlendOp: 0,
+            BlendFlags: 0,
+            SourceConstantAlpha: 255,
+            AlphaFormat: AC_SRC_ALPHA as u8,
+        };
+        unsafe {
+            UpdateLayeredWindow(
+                self.hwnd,
+                None,
+                Some(&origin),
+                Some(&size),
+                Some(self.memory_dc),
+                Some(&source),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
+            )
+        }
+        .context("update overlay layered window")
+    }
+
+    fn redraw_and_present(&self) -> Result<()> {
+        self.redraw_surface()?;
+        self.present()
+    }
+
+    fn show(&mut self) -> Result<()> {
         let was_visible = self.visible.load(Ordering::Acquire);
         if !was_visible {
             unsafe {
@@ -421,42 +645,16 @@ impl NativeOverlay {
                 )
             }
             .context("register overlay Escape hotkey")?;
+            self.track_mouse_leave();
         }
 
-        let mut cursor = POINT::default();
-        let result = unsafe {
-            GetCursorPos(&mut cursor)
-                .context("get cursor position")
-                .and_then(|_| {
-                    let origin = centered_origin(cursor.x, cursor.y, OVERLAY_SIZE);
-                    let size = SIZE {
-                        cx: OVERLAY_SIZE,
-                        cy: OVERLAY_SIZE,
-                    };
-                    let source = POINT { x: 0, y: 0 };
-                    let blend = BLENDFUNCTION {
-                        BlendOp: 0,
-                        BlendFlags: 0,
-                        SourceConstantAlpha: 255,
-                        AlphaFormat: AC_SRC_ALPHA as u8,
-                    };
-                    UpdateLayeredWindow(
-                        self.hwnd,
-                        None,
-                        Some(&POINT {
-                            x: origin.0,
-                            y: origin.1,
-                        }),
-                        Some(&size),
-                        Some(self.memory_dc),
-                        Some(&source),
-                        COLORREF(0),
-                        Some(&blend),
-                        ULW_ALPHA,
-                    )
-                    .context("update overlay layered window")
-                })
-        };
+        let result = (|| -> Result<()> {
+            let mut cursor = POINT::default();
+            unsafe { GetCursorPos(&mut cursor) }.context("get cursor position")?;
+            let (x, y) = centered_origin(cursor.x, cursor.y, OVERLAY_SIZE);
+            self.origin = Some(POINT { x, y });
+            self.redraw_and_present()
+        })();
         if let Err(error) = result {
             if !was_visible {
                 let _ = unsafe { UnregisterHotKey(Some(self.hwnd), ESCAPE_HOTKEY_ID) };
@@ -511,6 +709,12 @@ fn centered_origin(cursor_x: i32, cursor_y: i32, size: i32) -> (i32, i32) {
     (cursor_x - size / 2, cursor_y - size / 2)
 }
 
+fn point_from_lparam(lparam: LPARAM) -> (f32, f32) {
+    let x = (lparam.0 as i16) as f32;
+    let y = ((lparam.0 >> 16) as i16) as f32;
+    (x, y)
+}
+
 unsafe extern "system" fn window_proc(
     hwnd: HWND,
     message: u32,
@@ -535,8 +739,50 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_SHOW => {
             if let Some(state) = state {
+                if let Some(model) = state.take_pending_model() {
+                    state.ring = model;
+                    state.active_sector = None;
+                }
                 if let Err(error) = state.show() {
                     tracing::warn!("overlay show failed: {error:#}");
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            if let Some(state) = state {
+                state.track_mouse_leave();
+                let active = state.ring.hit_test(point_from_lparam(lparam));
+                if active != state.active_sector {
+                    state.active_sector = active;
+                    if let Err(error) = state.redraw_and_present() {
+                        tracing::warn!("overlay redraw failed: {error:#}");
+                    }
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            if let Some(state) = state {
+                if let Some(index) = state.ring.hit_test(point_from_lparam(lparam)) {
+                    if state.ring.expand(index) {
+                        state.active_sector = None;
+                        if let Err(error) = state.redraw_and_present() {
+                            tracing::warn!("overlay ring expansion failed: {error:#}");
+                        }
+                    } else if let Err(error) = state.hide() {
+                        tracing::warn!("overlay hide failed: {error:#}");
+                    }
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            if let Some(state) = state {
+                if state.active_sector.take().is_some() {
+                    if let Err(error) = state.redraw_and_present() {
+                        tracing::warn!("overlay hover clear failed: {error:#}");
+                    }
                 }
             }
             windows::Win32::Foundation::LRESULT(0)
@@ -570,6 +816,14 @@ unsafe extern "system" fn window_proc(
 mod tests {
     use super::*;
 
+    static NATIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn native_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        NATIVE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn centers_overlay_on_cursor() {
         assert_eq!(centered_origin(256, 256, OVERLAY_SIZE), (128, 128));
@@ -577,10 +831,22 @@ mod tests {
     }
 
     #[test]
+    fn decodes_mouse_coordinates() {
+        let lparam = LPARAM(((50_i32 as isize) << 16) | 100);
+        assert_eq!(point_from_lparam(lparam), (100.0, 50.0));
+    }
+
+    #[test]
     fn precreates_and_toggles_native_overlay() {
+        let _guard = native_test_guard();
         let overlay = Overlay::precreate().expect("precreate overlay");
         assert!(!overlay.is_visible());
-        overlay.show(&[]).expect("show overlay");
+        overlay
+            .show_with_children(
+                &["Convert".into(), "Archive".into()],
+                &[vec!["png".into()], vec!["zip".into()]],
+            )
+            .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
         unsafe {
             PostMessageW(
@@ -596,6 +862,7 @@ mod tests {
 
     #[test]
     fn external_close_stops_the_overlay_thread() {
+        let _guard = native_test_guard();
         let overlay = Overlay::precreate().expect("precreate overlay");
         unsafe { PostMessageW(Some(overlay.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) }
             .expect("post external close");

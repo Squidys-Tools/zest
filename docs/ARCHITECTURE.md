@@ -19,8 +19,8 @@ Source of truth for crate boundaries. PRD: tray radial menu for file conversion.
 ## Data flow (hotkey path)
 
 ```text
-hotkey (shell) → selection.resolve() (COM) → core::menu_model::rings()
-  → overlay.show(ring) (Direct2D, pre-created hidden window)
+hotkey (shell) → selection.resolve() (COM) → core::menu
+  → overlay.show_with_children(ring) (Direct2D, pre-created hidden window)
   → user picks leaf → convert::dispatch(job) (tokio task)
   → shell::toast done/error
 ```
@@ -31,7 +31,7 @@ hotkey (shell) → selection.resolve() (COM) → core::menu_model::rings()
 |---|---|---|
 | zest-core | FileKind, Selection, rings, naming, Settings | serde, anyhow/thiserror |
 | zest-selection | `resolve()` via ShellWindows COM; rejects Recycle Bin/This PC; Win11 tabs + Desktop special-cased | windows (Com, Shell), directories |
-| zest-convert | `dispatch()` → image/media/text/archive modules; ffmpeg presence check; GIF caps; md→pdf simple | image, resvg, tokio(process), compress-tools, serde_*, csv, quick-xml, toml |
+| zest-convert | `dispatch()` → image/media/text/archive modules; ffmpeg presence check; GIF caps; md→pdf simple | image, resvg, tokio(process), zip, tar, flate2, serde_*, csv, quick-xml, toml |
 | zest-shell | tray icon, global hotkeys (default Shift+F; Shift+C opens Convert), toast, HKCU Run startup, GitHub Releases updater | tray-icon, global-hotkey, windows (Notifications, Registry), reqwest, semver |
 | zest-overlay | sector geometry + angle hit-test, 200ms ease-out, acrylic/mica + gradient theme, center thumbnail/count | windows (Direct2D), core theme |
 | zest-settings | eframe/egui form: hotkey recorder, quality, output, theme, font, 1–3 gradient colors, startup, update cadence, lossy-warning toggle | eframe, core Settings |

@@ -24,7 +24,7 @@ uses `UpdateLayeredWindow`; it never builds the surface from scratch.
 
 ## Testable core
 
-Sector geometry and angle hit-testing (`layout_sectors`, `hit_test`,
+Sector geometry and point hit-testing (`layout_sectors`, `hit_test_at_point`,
 `ring_labels`) are pure logic with unit tests. The Direct2D renderer consumes
 that model and owns only pixels, blur, and animation. Native precreate,
 activation, and teardown are covered by the overlay crate's Windows test.
