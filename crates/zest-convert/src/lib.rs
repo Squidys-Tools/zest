@@ -34,6 +34,26 @@ pub enum ConvertError {
     HevcUnsupported,
 }
 
+/// Make sure `path`'s parent directory exists, so creating the file cannot fail
+/// with a bare filesystem error.
+///
+/// A configured output folder can be deleted, unmounted, or simply never
+/// existed; a chosen folder implies Zest may create it, the same way a Save-As
+/// dialog does. A no-op when the parent is the input's own directory, which
+/// already exists. An empty parent (a bare relative filename) has nothing to
+/// create.
+pub fn ensure_parent_dir(path: &std::path::Path) -> Result<(), ConvertError> {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|e| {
+        ConvertError::Io(format!(
+            "cannot use the output folder {}: {e}",
+            parent.display()
+        ))
+    })
+}
+
 /// What the user picked. The operation picks the engine; the input kind only
 /// picks the conversion engine within `Convert`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,19 +140,9 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
 
     // Honour the configured destination; the original is never touched.
     let out = zest_core::output_path_for(&job.input, &job.output_ext, &settings.output);
-    // A chosen folder can be deleted, unmounted, or simply not exist yet. Create
-    // it here, at the one place the destination is decided, so every engine
-    // benefits and the failure is a clear message instead of a raw filesystem
-    // error surfacing from `File::create`. A no-op for beside-the-original,
-    // whose directory is where the input already lives.
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            ConvertError::Io(format!(
-                "cannot use the output folder {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
+    // Create the destination once here, where it is decided, so every engine
+    // inherits the behaviour and a bad folder fails before any work starts.
+    ensure_parent_dir(&out)?;
     job.output = Some(out.clone());
 
     match kind {

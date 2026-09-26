@@ -7,11 +7,17 @@ otherwise.
 ## Images
 
 In: PNG, JPG, BMP, GIF, TIFF, WebP, ICO.
-Out: any of those plus PDF.
+Out: any of those.
 
-Conversion runs through the `image` crate in both directions. HEIC and SVG are
-not read yet: HEIC needs HEVC decoding, and SVG needs the `resvg` fallback.
-Both say so instead of failing quietly.
+Conversion runs through the `image` crate in both directions. Two formats the
+menu used to advertise are not offered yet, and Zest would rather omit a target
+than offer one that always fails:
+
+- **HEIC** is HEVC in a container and nothing decodes HEVC yet, so it is not
+  offered as an input you can convert, nor as an output.
+- **SVG** needs the `resvg` fallback, so it is not readable yet.
+- **PDF** is a text-engine format, not an image one, and the text engine is
+  still to come.
 
 JPEG has no alpha channel, so converting a transparent PNG to JPG composites
 onto white rather than leaving transparent pixels black.

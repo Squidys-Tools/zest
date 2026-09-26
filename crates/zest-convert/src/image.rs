@@ -103,6 +103,11 @@ fn write(
     };
     use image::{ExtendedColorType, ImageEncoder};
 
+    // Guarantee the parent here too, so this function is correct on its own
+    // rather than depending on dispatch having done it. `dispatch` still does it,
+    // which is what covers the other engines and fails before any work starts.
+    super::ensure_parent_dir(output)?;
+
     let file = std::fs::File::create(output)
         .map_err(|e| ConvertError::Io(format!("cannot write {}: {e}", output.display())))?;
     let mut writer = std::io::BufWriter::new(file);
@@ -509,6 +514,21 @@ mod tests {
         );
         assert!(output.exists(), "{} was not written", output.display());
         assert_eq!(output.parent(), Some(target_dir.as_path()));
+    }
+
+    #[test]
+    fn write_creates_its_own_parent_rather_than_trusting_the_caller() {
+        // Finding 01M3F41WGD3F: `write` must not depend on `dispatch` having
+        // created the directory. Exercised directly, bypassing dispatch.
+        let scratch = Scratch::new("write-creates-parent");
+        let output = scratch.join("deep").join("nested").join("out.jpg");
+        let rgba = [255u8, 128, 64, 255];
+
+        write(&output, "jpg", &rgba, 1, 1, 80).expect("write into a missing folder");
+        assert!(output.exists(), "{} was not written", output.display());
+
+        let bytes = std::fs::read(&output).expect("read output");
+        assert_eq!(&bytes[..2], &[0xFF, 0xD8], "not a JPEG");
     }
 
     fn written(path: &Path) -> bool {
