@@ -118,7 +118,8 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
         );
     }
 
-    let out = zest_core::unique_sibling_path(&job.input, &job.output_ext);
+    // Honour the configured destination; the original is never touched.
+    let out = zest_core::output_path_for(&job.input, &job.output_ext, &settings.output);
     job.output = Some(out.clone());
 
     match kind {

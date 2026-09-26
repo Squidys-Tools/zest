@@ -207,6 +207,7 @@ mod tests {
     use super::*;
     use crate::Job;
     use std::path::{Path, PathBuf};
+    use zest_core::OutputLocation;
 
     #[test]
     fn rejects_targets_outside_the_engine() {
@@ -437,6 +438,38 @@ mod tests {
         assert!(
             error.to_string().contains("not-an-image.png"),
             "error does not name the input: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_output_folder_is_honoured() {
+        let scratch = Scratch::new("output-folder");
+        let source_dir = scratch.join("in");
+        let target_dir = scratch.join("out");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+        std::fs::create_dir_all(&target_dir).expect("target dir");
+
+        let source = source_dir.join("noise.png");
+        write_noise_png(&source, 16, 16);
+
+        let settings = Settings {
+            output: OutputLocation::Folder(target_dir.clone()),
+            ..Settings::default()
+        };
+        let mut job = Job::new(&source, "jpg");
+        let output = crate::dispatch(&mut job, &settings)
+            .await
+            .expect("convert into the chosen folder");
+
+        assert_eq!(
+            output.parent(),
+            Some(target_dir.as_path()),
+            "output went somewhere the user did not choose"
+        );
+        assert!(output.exists(), "{} was not written", output.display());
+        assert!(
+            !source_dir.join("noise.jpg").exists(),
+            "output also landed beside the original"
         );
     }
 
