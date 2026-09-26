@@ -24,10 +24,22 @@ uses `UpdateLayeredWindow`; it never builds the surface from scratch.
 
 ## Testable core
 
-Sector geometry and point hit-testing (`layout_sectors`, `hit_test_at_point`,
-`ring_labels`) are pure logic with unit tests. The Direct2D renderer consumes
-that model and owns only pixels, blur, and animation. Native precreate,
-activation, and teardown are covered by the overlay crate's Windows test.
+Sector geometry and point hit-testing (`layout_sectors`, `hit_test_at_point`)
+are pure logic with unit tests. `RingModel` owns the menu: it keeps the
+`MenuNode` tree, expands a category into its children, and resolves a leaf
+click to that node's `MenuAction`. The Direct2D renderer consumes that model
+and owns only pixels, blur, and animation. Native precreate, activation, and
+the leaf-click-to-channel path are covered by the overlay crate's Windows
+tests.
+
+## Choice channel
+
+`Overlay::precreate()` returns the overlay plus a `MenuChoices` receiver. The
+overlay thread owns the HWND and sends the picked `MenuAction` over a tokio
+channel, so the app never reaches into the window. `zest-app` dispatches it
+against the selection the visible menu was built from: the overlay is
+`WS_EX_NOACTIVATE`, so Explorer keeps focus and its selection cannot change
+while the menu is up.
 
 ## DPI and edges
 

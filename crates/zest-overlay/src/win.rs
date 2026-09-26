@@ -53,7 +53,8 @@ use windows::{
 
 use windows::Win32::Graphics::Gdi::AC_SRC_ALPHA;
 
-use super::{RingModel, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS};
+use super::{Click, MenuChoices, RingModel, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS};
+use zest_core::{MenuAction, MenuNode};
 
 const OVERLAY_SIZE: i32 = OVERLAY_SIZE_F32 as i32;
 const ESCAPE_HOTKEY_ID: i32 = 0x5A57;
@@ -71,10 +72,13 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    pub fn precreate() -> Result<Self> {
+    /// Pre-create the hidden overlay. Returns the overlay plus the stream of
+    /// menu actions the user picks.
+    pub fn precreate() -> Result<(Self, MenuChoices)> {
         let visible = Arc::new(AtomicBool::new(false));
         let window = Arc::new(AtomicIsize::new(0));
         let pending_model = Arc::new(Mutex::new(None));
+        let (choice_tx, choice_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread_visible = Arc::clone(&visible);
         let thread_window = Arc::clone(&window);
@@ -86,6 +90,7 @@ impl Overlay {
                     thread_visible,
                     thread_window,
                     thread_pending_model,
+                    choice_tx,
                     ready_tx,
                 )
             })
@@ -103,28 +108,31 @@ impl Overlay {
             }
         };
 
-        Ok(Self {
-            thread: Some(thread),
-            window,
-            visible,
-            pending_model,
-        })
+        Ok((
+            Self {
+                thread: Some(thread),
+                window,
+                visible,
+                pending_model,
+            },
+            MenuChoices {
+                receiver: choice_rx,
+            },
+        ))
     }
 
-    pub fn show(&self, labels: &[String]) -> Result<()> {
-        let children = labels.iter().map(|_| Vec::new()).collect::<Vec<_>>();
-        self.show_with_children(labels, &children)
-    }
-
-    pub fn show_with_children(&self, labels: &[String], children: &[Vec<String>]) -> Result<()> {
-        let model = RingModel::new(labels, children)
-            .ok_or_else(|| anyhow!("overlay ring children must match their labels"))?;
+    /// Show `menu` at the cursor. Picking a category replaces the ring;
+    /// picking a leaf closes the overlay and hands back the action.
+    pub fn show(&self, menu: &[MenuNode]) -> Result<()> {
+        if menu.is_empty() {
+            return Err(anyhow!("overlay menu is empty"));
+        }
         {
             let mut pending = self
                 .pending_model
                 .lock()
                 .map_err(|_| anyhow!("overlay model lock poisoned"))?;
-            *pending = Some(model);
+            *pending = Some(RingModel::new(menu.to_vec()));
         }
         post(self.hwnd(), WM_APP_SHOW)
     }
@@ -164,9 +172,10 @@ fn overlay_thread(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
     pending_model: Arc<Mutex<Option<RingModel>>>,
+    choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ready: mpsc::SyncSender<Result<()>>,
 ) {
-    match run_overlay(visible, window, pending_model, &ready) {
+    match run_overlay(visible, window, pending_model, choices, &ready) {
         Ok(()) => {}
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -178,13 +187,19 @@ fn run_overlay(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
     pending_model: Arc<Mutex<Option<RingModel>>>,
+    choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ready: &mpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
     let instance = unsafe { GetModuleHandleW(None) }.context("get overlay module handle")?;
     let instance = HINSTANCE(instance.0);
     register_class(instance)?;
 
-    let state = match NativeOverlay::new(Arc::clone(&visible), Arc::clone(&window), pending_model) {
+    let state = match NativeOverlay::new(
+        Arc::clone(&visible),
+        Arc::clone(&window),
+        pending_model,
+        choices,
+    ) {
         Ok(state) => state,
         Err(error) => {
             unregister_class(instance);
@@ -288,6 +303,7 @@ struct NativeOverlay {
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
     pending_model: Arc<Mutex<Option<RingModel>>>,
+    choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     memory_dc: windows::Win32::Graphics::Gdi::HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
     old_bitmap: HGDIOBJ,
@@ -305,6 +321,7 @@ impl NativeOverlay {
         visible: Arc<AtomicBool>,
         window: Arc<AtomicIsize>,
         pending_model: Arc<Mutex<Option<RingModel>>>,
+        choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ) -> Result<Self> {
         unsafe {
             let memory_dc = CreateCompatibleDC(None);
@@ -425,6 +442,7 @@ impl NativeOverlay {
                 visible,
                 window,
                 pending_model,
+                choices,
                 memory_dc,
                 bitmap,
                 old_bitmap,
@@ -768,13 +786,22 @@ unsafe extern "system" fn window_proc(
         WM_LBUTTONUP => {
             if let Some(state) = state {
                 if let Some(index) = state.ring.hit_test(point_from_lparam(lparam)) {
-                    if state.ring.expand(index) {
-                        state.active_sector = None;
-                        if let Err(error) = state.redraw_and_present() {
-                            tracing::warn!("overlay ring expansion failed: {error:#}");
+                    match state.ring.click(index) {
+                        Click::Expanded => {
+                            state.active_sector = None;
+                            if let Err(error) = state.redraw_and_present() {
+                                tracing::warn!("overlay ring expansion failed: {error:#}");
+                            }
                         }
-                    } else if let Err(error) = state.hide() {
-                        tracing::warn!("overlay hide failed: {error:#}");
+                        Click::Action(action) => {
+                            if let Err(error) = state.choices.send(action) {
+                                tracing::warn!("menu choice channel closed: {error:#}");
+                            }
+                            if let Err(error) = state.hide() {
+                                tracing::warn!("overlay hide failed: {error:#}");
+                            }
+                        }
+                        Click::Miss => {}
                     }
                 }
             }
@@ -842,14 +869,9 @@ mod tests {
     #[test]
     fn precreates_and_toggles_native_overlay() {
         let _guard = native_test_guard();
-        let overlay = Overlay::precreate().expect("precreate overlay");
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
         assert!(!overlay.is_visible());
-        overlay
-            .show_with_children(
-                &["Convert".into(), "Archive".into()],
-                &[vec!["png".into()], vec!["zip".into()]],
-            )
-            .expect("show overlay");
+        overlay.show(&test_menu()).expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
         unsafe {
             PostMessageW(
@@ -864,13 +886,68 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_leaf_reports_its_action() {
+        let _guard = native_test_guard();
+        let (overlay, mut choices) = Overlay::precreate().expect("precreate overlay");
+        overlay.show(&test_menu()).expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+
+        // Ring 1: "Convert" sits at the top, so a click straight up expands it.
+        click_at(&overlay, 128.0, 28.0);
+        // Ring 2: first Convert target is "png", again at the top.
+        click_at(&overlay, 128.0, 28.0);
+
+        let action = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(5), choices.recv()).await
+            });
+        assert_eq!(
+            action.expect("menu choice within timeout"),
+            Some(MenuAction::Convert {
+                ext: "png".to_string()
+            })
+        );
+        assert!(wait_for(|| !overlay.is_visible()));
+    }
+
+    #[test]
     fn external_close_stops_the_overlay_thread() {
         let _guard = native_test_guard();
-        let overlay = Overlay::precreate().expect("precreate overlay");
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
         unsafe { PostMessageW(Some(overlay.hwnd()), WM_CLOSE, WPARAM(0), LPARAM(0)) }
             .expect("post external close");
         std::thread::sleep(std::time::Duration::from_millis(100));
         drop(overlay);
+    }
+
+    fn test_menu() -> Vec<MenuNode> {
+        vec![
+            MenuNode {
+                label: "Convert".to_string(),
+                action: None,
+                children: vec![MenuNode {
+                    label: "png".to_string(),
+                    action: Some(MenuAction::Convert {
+                        ext: "png".to_string(),
+                    }),
+                    children: Vec::new(),
+                }],
+            },
+            MenuNode {
+                label: "Archive".to_string(),
+                action: None,
+                children: Vec::new(),
+            },
+        ]
+    }
+
+    fn click_at(overlay: &Overlay, x: f32, y: f32) {
+        let lparam = LPARAM(((y as i32 as isize) << 16) | (x as i32 as isize));
+        unsafe { PostMessageW(Some(overlay.hwnd()), WM_LBUTTONUP, WPARAM(0), lparam) }
+            .expect("post left button up");
     }
 
     fn wait_for(condition: impl Fn() -> bool) -> bool {

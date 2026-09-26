@@ -9,6 +9,7 @@ license.workspace = true
 zest-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
