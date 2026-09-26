@@ -6,12 +6,32 @@ task. Engines land one at a time: images → media → archives → text.
 
 ## Images (`convert::image`)
 
-Primary path is WIC through `windows-rs`: hardware-accelerated, already knows
-the common raster formats. `image` and `resvg` are fallbacks; SVG is input-only.
+Pure `image`, both directions. It covers every advertised output except HEIC and
+PDF, and it is where `jpeg_quality` is applied.
 
-HEIC is the sharp edge: output needs either a capable crate or the OS HEVC
-extension, which may not be installed. Detect it and guide the user to install
-it. Never fail silently.
+WIC was the planned primary path and this section used to say so. It is not
+usable through `windows` 0.61, verified rather than assumed:
+
+- `IWICBitmapFrameEncode::EndWrite` is unbound, so every
+  `IWICBitmapEncoder::Commit` fails with `WINCODEC_ERR_WRONGSTATE` — no
+  container encodes.
+- Encoder property bags from `IWICImagingFactory::CreateEncoderPropertyBag`
+  are rejected by `IWICBitmapFrameEncode::Initialize` with `E_INVALIDARG`, so
+  `jpeg_quality` was unreachable through WIC.
+- `IWICImagingFactory::CreateDecoderFromFilename` is generated at the wrong
+  vtable slot and fails (`0x8007007F` / `0x80070006`). The stream path works.
+
+Two consequences worth remembering:
+
+- **HEIC is HEVC in a container, and nothing decodes HEVC yet.** The engine says
+  so (`ConvertError::HevcUnsupported`) rather than blaming a missing codec on the
+  machine. The likely fix is the FFmpeg subprocess in Phase 4, which decodes
+  HEVC and is already a committed dependency — that would make HEIC free.
+- **JPEG has no alpha.** Transparency is composited onto white, not dropped,
+  because dropping it leaves transparent pixels black.
+
+SVG input needs `resvg` (SQU-39). PDF output belongs to `convert::text`
+(SQU-51), and the image engine rejects it rather than half-doing it.
 
 ## Media (`convert::media`)
 

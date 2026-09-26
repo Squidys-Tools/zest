@@ -13,8 +13,8 @@ Source of truth for crate boundaries. PRD: tray radial menu for file conversion.
   (default) with `name (1).ext` collision suffix, a chosen folder, or ask-each-time.
 - Async everywhere in `app`/`convert` via tokio; FFmpeg runs as a subprocess
   (MVP), archives via pure-Rust `zip`/`tar`/`flate2` (libarchive remains a
-  later option), images via WIC first with
-  `image`/`resvg` fallback, text via serde parsers.
+  later option), images via the `image` crate with `resvg` for SVG, text via
+  serde parsers. No native dependencies anywhere.
 
 ## Data flow (hotkey path)
 

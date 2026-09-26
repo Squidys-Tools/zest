@@ -44,13 +44,19 @@ Exit: category selection replaces the current ring; same action always at the sa
 
 ## Phase 3 — Image engine (quickest feedback loop)
 
-- [ ] WIC primary encode/decode via `windows-rs` (`convert::image`).
-- [ ] `image` + `resvg` fallback; SVG input.
-- [ ] Outputs: PNG, JPG, BMP, GIF, TIFF, WebP, HEIC, ICO + PDF.
-- [ ] JPEG quality slider (1–100) wired through.
-- [ ] HEIC/HEVC detection with install guidance (never silent failure).
+- [x] `image`-crate encode/decode for the common raster formats
+      (`convert::image`). WIC was dropped: `windows` 0.61 cannot encode through
+      it (unbound `EndWrite`, unusable encoder property bags) and could not
+      honour JPEG quality. Evidence in `docs/internals/conversion-engines.md`.
+- [ ] `resvg` fallback; SVG input.
+- [x] Outputs: PNG, JPG, BMP, GIF, TIFF, WebP, ICO.
+- [x] JPEG quality slider (1–100) wired through.
+- [ ] HEIC decode (HEVC). Likely via the Phase 4 FFmpeg subprocess, which is
+      already a committed dependency and decodes HEVC (SQU-38).
+- [ ] PDF output from the text engine (SQU-51).
 
-Exit: PNG → JPG/WebP/PDF beside the original with collision numbering.
+Exit: PNG → JPG/WebP beside the original with collision numbering. (PDF is
+covered by Phase 6.)
 
 ## Phase 4 — Video / audio engine
 

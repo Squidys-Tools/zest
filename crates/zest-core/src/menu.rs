@@ -51,11 +51,14 @@ pub fn categories_for_selection(sel: &Selection) -> Vec<ActionCategory> {
 }
 
 /// Ring-2 Convert leaves per kind (output extensions, no dot).
+///
+/// Only targets the engine can actually produce appear here. `heic` is absent
+/// on purpose: nothing decodes HEVC yet (SQU-59), and offering a target that
+/// always fails is worse than not offering it. `pdf` is likewise absent because
+/// it belongs to the text engine (SQU-51), not the image one.
 pub fn convert_targets(kind: FileKind) -> &'static [&'static str] {
     match kind {
-        FileKind::Image => &[
-            "png", "jpg", "webp", "bmp", "gif", "tiff", "ico", "heic", "pdf",
-        ],
+        FileKind::Image => &["png", "jpg", "webp", "bmp", "gif", "tiff", "ico"],
         FileKind::Video => &["mp4", "webm", "avi", "mkv", "mov", "gif"],
         FileKind::Audio => &["mp3", "wav", "flac", "aac", "ogg", "m4a", "opus"],
         FileKind::TextData => &["txt", "csv", "json", "xml", "yaml", "toml", "md", "pdf"],
@@ -167,6 +170,28 @@ mod tests {
 
     fn sel(names: &[&str]) -> Selection {
         Selection::new(names.iter().map(PathBuf::from).collect())
+    }
+
+    /// A target the engine always rejects must not reach the ring: offering a
+    /// leaf that cannot work is worse than not offering it. HEVC decoding is
+    /// SQU-59, PDF output is the text engine's job (SQU-51).
+    #[test]
+    fn the_convert_ring_offers_no_dead_targets() {
+        let targets = convert_targets(FileKind::Image);
+        for dead in ["heic", "pdf", "svg"] {
+            assert!(
+                !targets.contains(&dead),
+                "{dead} cannot be produced yet but is offered in ring 2"
+            );
+        }
+    }
+
+    #[test]
+    fn the_convert_ring_still_offers_the_real_raster_targets() {
+        let targets = convert_targets(FileKind::Image);
+        for live in ["png", "jpg", "webp", "bmp", "gif", "tiff", "ico"] {
+            assert!(targets.contains(&live), "{live} should be offered");
+        }
     }
 
     #[test]

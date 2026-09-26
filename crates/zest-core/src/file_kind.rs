@@ -19,7 +19,9 @@ impl FileKind {
     /// Folders are detected by the caller (see `classify_path`).
     pub fn from_extension(ext: &str) -> Self {
         match ext.to_ascii_lowercase().as_str() {
-            // Images (WIC primary, `image`/`resvg` fallback; SVG input only)
+            // Images (`image` crate; `resvg` for SVG input only). heic/heif are
+            // classified here so they still get a menu, and the engine returns
+            // the actionable "needs HEVC" error rather than "unknown file".
             "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tiff" | "tif" | "webp" | "heic" | "heif"
             | "ico" | "svg" => Self::Image,
             // Video (FFmpeg)
