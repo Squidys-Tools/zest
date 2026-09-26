@@ -13,7 +13,7 @@ pub use menu::{
     categories_for_selection, convert_menu_for_selection, convert_targets, menu_for_selection,
     ActionCategory, MenuAction, MenuNode,
 };
-pub use naming::unique_sibling_path;
+pub use naming::{output_path_for, unique_sibling_path};
 pub use settings::{
     OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY,
     DEFAULT_HOTKEY,
