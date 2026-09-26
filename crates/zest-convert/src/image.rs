@@ -478,6 +478,39 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_missing_output_folder_is_created_rather_than_failing() {
+        // A chosen folder can be deleted or never exist. Converting into it
+        // should create it, not fail with a raw filesystem error (finding
+        // 01M3F3SJ7VA7 / 01M3F41WGD3F on the first attempt at this).
+        let scratch = Scratch::new("missing-output-folder");
+        let source_dir = scratch.join("in");
+        std::fs::create_dir_all(&source_dir).expect("source dir");
+        let source = source_dir.join("noise.png");
+        write_noise_png(&source, 16, 16);
+
+        // Two levels deep, so `create_dir_all` is genuinely exercised.
+        let target_dir = scratch.join("does").join("not").join("exist");
+        assert!(!target_dir.exists(), "precondition: folder must be missing");
+
+        let settings = Settings {
+            output: OutputLocation::Folder(target_dir.clone()),
+            ..Settings::default()
+        };
+        let mut job = Job::new(&source, "jpg");
+        let output = crate::dispatch(&mut job, &settings)
+            .await
+            .expect("a missing output folder must be created");
+
+        assert!(
+            target_dir.is_dir(),
+            "{} was not created",
+            target_dir.display()
+        );
+        assert!(output.exists(), "{} was not written", output.display());
+        assert_eq!(output.parent(), Some(target_dir.as_path()));
+    }
+
     fn written(path: &Path) -> bool {
         path.exists()
             && std::fs::metadata(path)

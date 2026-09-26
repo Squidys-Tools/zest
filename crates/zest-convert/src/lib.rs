@@ -120,6 +120,19 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
 
     // Honour the configured destination; the original is never touched.
     let out = zest_core::output_path_for(&job.input, &job.output_ext, &settings.output);
+    // A chosen folder can be deleted, unmounted, or simply not exist yet. Create
+    // it here, at the one place the destination is decided, so every engine
+    // benefits and the failure is a clear message instead of a raw filesystem
+    // error surfacing from `File::create`. A no-op for beside-the-original,
+    // whose directory is where the input already lives.
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            ConvertError::Io(format!(
+                "cannot use the output folder {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
     job.output = Some(out.clone());
 
     match kind {
