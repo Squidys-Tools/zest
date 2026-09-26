@@ -6,15 +6,15 @@ otherwise.
 
 ## Images
 
-In: PNG, JPG, BMP, GIF, TIFF, WebP, HEIC, ICO, SVG.
+In: PNG, JPG, BMP, GIF, TIFF, WebP, ICO.
 Out: any of those plus PDF.
 
-Most conversion goes through Windows Imaging Component (WIC):
-hardware-accelerated and already aware of the common formats. SVG and edge
-cases fall back to Rust-native libraries.
+Conversion runs through the `image` crate in both directions. HEIC and SVG are
+not read yet: HEIC needs HEVC decoding, and SVG needs the `resvg` fallback.
+Both say so instead of failing quietly.
 
-HEIC depends on HEVC support on the machine. If it is missing, Zest tells you
-what to install instead of failing silently.
+JPEG has no alpha channel, so converting a transparent PNG to JPG composites
+onto white rather than leaving transparent pixels black.
 
 ## Video
 

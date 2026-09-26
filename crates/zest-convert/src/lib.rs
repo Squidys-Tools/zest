@@ -1,13 +1,13 @@
 //! Conversion engines behind one `dispatch()` (PRD §What It Can Convert).
 //!
-//! - image: WIC primary (via `windows`), `image` + `resvg` fallback; SVG input.
+//! - image: `image` crate; `resvg` for SVG input (SQU-39).
 //! - media: bundled FFmpeg subprocess; video→GIF caps resolution/framerate.
 //! - text: serde parsers; md→PDF intentionally simple (fixed-width, paginated).
 //! - archive: pure-Rust `zip`/`tar`/`flate2` for MVP (zip/tar/tar.gz/gzip
 //!   create+extract); libarchive swap is a later option if needed.
 //!
-//! MVP order: images → media → archives → text. Each `convert()` currently
-//! validates + stubs so the workspace builds; engines land per milestone.
+//! MVP order: images → media → archives → text. Media, archive, and text
+//! still validate and stub; the image engine is live (SQU-40).
 
 pub mod archive;
 pub mod image;
@@ -28,6 +28,10 @@ pub enum ConvertError {
     Io(String),
     #[error("engine not yet implemented (MVP): {0}")]
     NotImplemented(String),
+    /// HEIC is HEVC in a container, and nothing decodes HEVC yet. Never a bare
+    /// failure: the message names the gap rather than blaming the machine.
+    #[error("HEIC needs HEVC decoding, which Zest does not do yet (SQU-38)")]
+    HevcUnsupported,
 }
 
 /// What the user picked. The operation picks the engine; the input kind only
@@ -145,22 +149,31 @@ mod tests {
 
     #[tokio::test]
     async fn convert_picks_the_engine_from_the_input_kind() {
-        let mut job = Job::new(Path::new("photo.png"), "jpg");
-        let error = dispatch(&mut job, &Settings::default())
+        // A real file, so the image engine runs instead of failing on a missing
+        // path. The routing assertion is about which engine answers.
+        // `::image` because this module has a child named `image`.
+        let source = std::env::temp_dir().join(format!("zest-routing-{}.png", std::process::id()));
+        ::image::RgbaImage::new(4, 4)
+            .save(&source)
+            .expect("write png");
+        let expected_bmp = source.with_extension("bmp");
+        let _ = std::fs::remove_file(&expected_bmp);
+
+        let mut job = Job::new(&source, "bmp");
+        crate::dispatch(&mut job, &Settings::default())
             .await
-            .expect_err("image engine is still a stub");
-        assert!(
-            error.to_string().contains("image engine"),
-            "unexpected error: {error}"
-        );
+            .expect("png converts to bmp");
+        assert_eq!(job.output.as_deref(), Some(expected_bmp.as_path()));
 
         // "zip" is not an image output, so the image engine rejects it rather
         // than quietly packing the file.
-        let mut job = Job::new(Path::new("photo.png"), "zip");
-        let error = dispatch(&mut job, &Settings::default())
+        let mut job = Job::new(&source, "zip");
+        let error = crate::dispatch(&mut job, &Settings::default())
             .await
             .expect_err("images do not convert to zip");
         assert!(matches!(error, ConvertError::Unsupported(_, _)), "{error}");
+
+        let _ = std::fs::remove_file(&expected_bmp);
     }
 
     #[tokio::test]
