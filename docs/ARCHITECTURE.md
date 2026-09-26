@@ -19,9 +19,10 @@ Source of truth for crate boundaries. PRD: tray radial menu for file conversion.
 ## Data flow (hotkey path)
 
 ```text
-hotkey (shell) → selection.resolve() (COM) → core::menu
-  → overlay.show_with_children(ring) (Direct2D, pre-created hidden window)
-  → user picks leaf → convert::dispatch(job) (tokio task)
+hotkey (shell) → selection.resolve() (COM) → core::menu (MenuNode tree)
+  → overlay.show(menu) (Direct2D, pre-created hidden window)
+  → user picks a leaf → MenuAction over a channel
+  → convert::dispatch(job) (tokio task)
   → shell::toast done/error
 ```
 
@@ -33,7 +34,7 @@ hotkey (shell) → selection.resolve() (COM) → core::menu
 | zest-selection | `resolve()` via ShellWindows COM; rejects Recycle Bin/This PC; Win11 tabs + Desktop special-cased | windows (Com, Shell), directories |
 | zest-convert | `dispatch()` → image/media/text/archive modules; ffmpeg presence check; GIF caps; md→pdf simple | image, resvg, tokio(process), zip, tar, flate2, serde_*, csv, quick-xml, toml |
 | zest-shell | tray icon, global hotkeys (default Shift+F; Shift+C opens Convert), toast, HKCU Run startup, GitHub Releases updater | tray-icon, global-hotkey, windows (Notifications, Registry), reqwest, semver |
-| zest-overlay | sector geometry + angle hit-test, 200ms ease-out, acrylic/mica + gradient theme, center thumbnail/count | windows (Direct2D), core theme |
+| zest-overlay | sector geometry + angle hit-test, ring model over the `MenuNode` tree, choice channel, 200ms ease-out, acrylic/mica + gradient theme, center thumbnail/count | windows (Direct2D), core menu |
 | zest-settings | eframe/egui form: hotkey recorder, quality, output, theme, font, 1–3 gradient colors, startup, update cadence, lossy-warning toggle | eframe, core Settings |
 | zest-app | clap CLI, single-instance note, tokio main wiring | tokio, clap, tracing |
 
@@ -46,6 +47,11 @@ Ring 1 (categories, filtered):
 
 Ring 2: Convert → formats for that kind; Archive → zip/tar/tar.gz/gzip;
 Extract → destination/confirm. `Shift+C` jumps straight to the Convert ring.
+
+`core::menu` owns the whole tree as `MenuNode`s: categories carry no action and
+only fan out, leaves carry one `MenuAction` (Convert/Archive/Extract + target
+extension). The overlay renders that tree and reports the picked action; the
+app dispatches it. Nothing in the UI layer re-derives menu meaning from labels.
 
 ## Riskiest first
 

@@ -25,8 +25,9 @@
 | Lint | `cargo clippy --workspace` |
 | Format | `cargo fmt --all` |
 
-`--check-selection` prints the resolved selection and the menu it would show,
-falling back to a mock PNG when COM has nothing focused. Settings persist to
+`--check-selection` prints the resolved selection, both rings with the action
+behind every leaf, and the `Shift+C` ring, falling back to a mock PNG when COM
+has nothing focused. Settings persist to
 `%LOCALAPPDATA%\Zest\settings.json`.
 
 ## Contribution policy

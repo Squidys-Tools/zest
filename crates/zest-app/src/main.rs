@@ -5,8 +5,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use zest_core::menu::ActionCategory;
-use zest_core::{categories_for_selection, Selection, Settings};
+use zest_convert::Job;
+use zest_core::{
+    convert_menu_for_selection, menu_for_selection, MenuAction, MenuNode, Selection, Settings,
+};
 use zest_overlay::Overlay;
 use zest_selection::SelectionError;
 use zest_shell::tray::TrayAction;
@@ -52,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let overlay = Overlay::precreate()?;
+    let (overlay, mut choices) = Overlay::precreate()?;
     let mut tray_rx = zest_shell::tray::build()?;
     let (mut hotkey_listener, mut hotkey_notice) = match zest_shell::hotkey::register(
         &settings.hotkey,
@@ -128,10 +130,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("zest running");
+    // The selection the visible menu was built from. The overlay never takes
+    // focus, so the Explorer selection cannot change while it is up.
+    let mut shown: Option<Selection> = None;
     loop {
         tokio::select! {
             action = tray_rx.recv() => match action {
-                Some(TrayAction::Show) => show_overlay(&overlay),
+                Some(TrayAction::Show) => show_overlay(&overlay, &mut shown),
                 Some(TrayAction::Settings) => open_settings(None),
                 Some(TrayAction::Quit) | None => break,
             },
@@ -141,14 +146,23 @@ async fn main() -> anyhow::Result<()> {
                     None => std::future::pending().await,
                 }
             } => match action {
-                Some(zest_shell::hotkey::HotkeyAction::OpenMenu) => show_overlay(&overlay),
-                Some(zest_shell::hotkey::HotkeyAction::OpenConvert) => show_convert_overlay(&overlay),
+                Some(zest_shell::hotkey::HotkeyAction::OpenMenu) => show_overlay(&overlay, &mut shown),
+                Some(zest_shell::hotkey::HotkeyAction::OpenConvert) => show_convert_overlay(&overlay, &mut shown),
                 None => {
                     tracing::error!("global hotkey listener stopped; tray actions remain available");
                     open_settings(Some(
                         "The global hotkey listener stopped unexpectedly. Tray actions still work; restart Zest to try again.".into(),
                     ));
                     hotkey_listener = None;
+                }
+            },
+            choice = choices.recv() => match choice {
+                Some(choice) => run_choice(choice, shown.take()),
+                None => {
+                    tracing::error!("overlay stopped; tray actions remain available");
+                    open_settings(Some(
+                        "The overlay stopped unexpectedly. Tray actions still work; restart Zest to try again.".into(),
+                    ));
                 }
             },
             _ = tokio::signal::ctrl_c() => break,
@@ -158,95 +172,123 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Tray Show / (future) hotkey path: ring-1 labels for the live selection.
-fn show_overlay(overlay: &Overlay) {
-    let (labels, children) = match zest_selection::resolve() {
-        Ok(sel) => {
-            let cats = categories_for_selection(&sel);
-            let labels = zest_overlay::ring_labels(&cats);
-            let children = cats
-                .iter()
-                .map(|category| ring_two_labels(&sel, *category))
-                .collect::<Vec<_>>();
-            (labels, children)
+/// Tray Show / hotkey path: the two-ring menu for the live selection.
+fn show_overlay(overlay: &Overlay, shown: &mut Option<Selection>) {
+    let (selection, menu) = match resolve_selection() {
+        Ok(selection) => {
+            let menu = menu_for_selection(&selection);
+            (Some(selection), menu)
         }
+        // Selection unknown here; picking a leaf re-reads it.
+        Err(()) => (None, fallback_menu()),
+    };
+    *shown = if show_menu(overlay, &menu) {
+        selection
+    } else {
+        None
+    };
+}
+
+fn show_convert_overlay(overlay: &Overlay, shown: &mut Option<Selection>) {
+    if let Ok(selection) = resolve_selection() {
+        let menu = convert_menu_for_selection(&selection);
+        if menu.is_empty() {
+            tracing::info!("selection has no Convert targets");
+            *shown = None;
+            return;
+        }
+        *shown = show_menu(overlay, &menu).then_some(selection);
+    }
+}
+
+fn resolve_selection() -> Result<Selection, ()> {
+    match zest_selection::resolve() {
+        Ok(selection) => Ok(selection),
         Err(SelectionError::VirtualFolder) => {
             tracing::info!("selection is a virtual folder; no menu to show");
-            return;
-        }
-        Err(e) => {
-            tracing::debug!("selection resolve failed ({e}); showing fallback ring");
-            (
-                vec!["Convert".to_string(), "Archive".to_string()],
-                vec![Vec::new(), Vec::new()],
-            )
-        }
-    };
-    let (labels, children) = if labels.is_empty() {
-        (
-            vec!["Convert".to_string(), "Archive".to_string()],
-            vec![Vec::new(), Vec::new()],
-        )
-    } else {
-        (labels, children)
-    };
-    if let Err(error) = overlay.show_with_children(&labels, &children) {
-        tracing::warn!("overlay show failed: {error:#}");
-    }
-}
-
-fn ring_two_labels(selection: &Selection, category: ActionCategory) -> Vec<String> {
-    match category {
-        ActionCategory::Convert => selection
-            .files
-            .first()
-            .map(|path| {
-                zest_core::convert_targets(zest_core::file_kind::classify_path(path))
-                    .iter()
-                    .map(|target| (*target).to_string())
-                    .collect()
-            })
-            .unwrap_or_default(),
-        ActionCategory::Archive => zest_core::menu::archive_targets()
-            .iter()
-            .map(|target| (*target).to_string())
-            .collect(),
-        ActionCategory::Extract => Vec::new(),
-    }
-}
-
-fn show_convert_overlay(overlay: &Overlay) {
-    let selection = match zest_selection::resolve() {
-        Ok(selection) => selection,
-        Err(SelectionError::VirtualFolder) => {
-            tracing::info!("selection is a virtual folder; no Convert menu to show");
-            return;
+            Err(())
         }
         Err(error) => {
-            tracing::debug!("selection resolve failed ({error}); no Convert menu to show");
-            return;
+            tracing::debug!("selection resolve failed ({error}); showing fallback ring");
+            Err(())
         }
-    };
-
-    if !categories_for_selection(&selection).contains(&ActionCategory::Convert) {
-        tracing::info!("selection has no Convert action");
-        return;
     }
+}
 
-    let Some(path) = selection.files.first() else {
-        return;
-    };
-    let kind = zest_core::file_kind::classify_path(path);
-    let labels: Vec<String> = zest_core::convert_targets(kind)
-        .iter()
-        .map(|target| (*target).to_string())
-        .collect();
-    if labels.is_empty() {
-        tracing::info!(?kind, "selection has no Convert targets");
-        return;
+/// Menu shown when the selection cannot be read: the categories and targets a
+/// PNG would get, so the menu still tells the truth about what Zest can do.
+fn fallback_menu() -> Vec<MenuNode> {
+    menu_for_selection(&Selection::new(vec![std::path::PathBuf::from(
+        "selection.png",
+    )]))
+}
+
+/// Show the menu; reports whether it is now on screen.
+fn show_menu(overlay: &Overlay, menu: &[MenuNode]) -> bool {
+    if menu.is_empty() {
+        tracing::info!("nothing to convert for this selection");
+        return false;
     }
-    if let Err(error) = overlay.show(&labels) {
-        tracing::warn!("Convert overlay show failed: {error:#}");
+    if let Err(error) = overlay.show(menu) {
+        tracing::warn!("overlay show failed: {error:#}");
+        return false;
+    }
+    true
+}
+
+/// Run the picked action for every selected file. Runs off the event loop so a
+/// slow conversion never stalls the hotkeys. `selection` is the snapshot the
+/// visible menu was built from; without one the selection is re-read.
+fn run_choice(choice: MenuAction, selection: Option<Selection>) {
+    tokio::spawn(async move {
+        let selection = match selection.filter(|selection| !selection.is_empty()) {
+            Some(selection) => selection,
+            None => match resolve_now() {
+                Ok(selection) => selection,
+                Err(()) => return,
+            },
+        };
+        run_action(&choice, &selection).await;
+    });
+}
+
+fn resolve_now() -> Result<Selection, ()> {
+    match zest_selection::resolve() {
+        Ok(selection) if !selection.is_empty() => Ok(selection),
+        Ok(_) => {
+            tracing::warn!("nothing is selected; nothing to run");
+            Err(())
+        }
+        Err(SelectionError::VirtualFolder) => {
+            tracing::warn!("selection is a virtual folder; nothing to run");
+            Err(())
+        }
+        Err(error) => {
+            tracing::warn!("selection resolve failed ({error}); nothing to run");
+            Err(())
+        }
+    }
+}
+
+async fn run_action(choice: &MenuAction, selection: &Selection) {
+    let settings = Settings::load();
+    for input in &selection.files {
+        let mut job = match choice {
+            MenuAction::Convert { ext } => Job::new(input, ext),
+            MenuAction::Archive { ext } => Job::archive(input, ext),
+            MenuAction::Extract => Job::extract(input),
+        };
+        tracing::info!(
+            input = %input.display(),
+            operation = ?job.operation,
+            ext = %job.output_ext,
+            kind = ?zest_core::file_kind::classify_path(input),
+            "running menu action"
+        );
+        match zest_convert::dispatch(&mut job, &settings).await {
+            Ok(output) => tracing::info!(output = %output.display(), "done"),
+            Err(error) => tracing::warn!(input = %input.display(), "failed: {error}"),
+        }
     }
 }
 
@@ -283,19 +325,20 @@ async fn check_selection() -> anyhow::Result<()> {
 }
 
 fn print_menu(sel: &Selection) -> anyhow::Result<()> {
-    let cats = categories_for_selection(sel);
     println!("files: {:?}", sel.files);
-    println!("ring 1: {cats:?}");
-    for c in &cats {
-        if matches!(c, zest_core::menu::ActionCategory::Convert) {
-            let kind = sel
-                .files
-                .first()
-                .map(|p| zest_core::file_kind::classify_path(p));
-            if let Some(k) = kind {
-                println!("ring 2 (convert): {:?}", zest_core::convert_targets(k));
-            }
-        }
-    }
+    print_ring(1, &menu_for_selection(sel));
+    println!("shift+c ring:");
+    print_ring(1, &convert_menu_for_selection(sel));
     Ok(())
+}
+
+fn print_ring(depth: usize, nodes: &[MenuNode]) {
+    for node in nodes {
+        let indent = "  ".repeat(depth);
+        match &node.action {
+            Some(action) => println!("{indent}{} -> {action:?}", node.label),
+            None => println!("{indent}{}", node.label),
+        }
+        print_ring(depth + 1, &node.children);
+    }
 }

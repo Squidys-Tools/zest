@@ -26,8 +26,8 @@ only theme-relevant fields (font, gradient, dark/light).
 ## The hotkey pipeline
 
 ```text
-hotkey (shell) → selection.resolve() → menu model (core)
-  → overlay.show_with_children(ring) → user picks leaf → convert::dispatch(job)
+hotkey (shell) → selection.resolve() → menu tree (core)
+  → overlay.show(menu) → user picks leaf → MenuAction → convert::dispatch(job)
   → shell::toast done/error
 ```
 

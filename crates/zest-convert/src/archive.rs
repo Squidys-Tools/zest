@@ -23,3 +23,10 @@ pub async fn convert_or_extract(
         "archive engine (zip/tar/flate2)".to_string(),
     ))
 }
+
+/// Unpack an archive into a folder beside it (SQU-49).
+pub async fn extract(_job: &Job, _settings: &Settings) -> Result<std::path::PathBuf, ConvertError> {
+    Err(ConvertError::NotImplemented(
+        "archive extraction (zip/tar/flate2)".to_string(),
+    ))
+}
