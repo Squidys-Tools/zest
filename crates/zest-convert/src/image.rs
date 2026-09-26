@@ -21,6 +21,11 @@ use std::path::PathBuf;
 use zest_core::Settings;
 
 /// Outputs the engine accepts (SVG is input-only).
+///
+/// `heic` and `pdf` are accepted-and-rejected on purpose rather than omitted:
+/// the menu is built from `zest_core::convert_targets`, which does not offer
+/// them, so a job for one can only come from a direct API caller. Rejecting
+/// with a specific reason beats a generic "unsupported".
 pub const OUTPUTS: &[&str] = &[
     "png", "jpg", "bmp", "gif", "tiff", "webp", "heic", "ico", "pdf",
 ];
