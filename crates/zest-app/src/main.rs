@@ -223,13 +223,15 @@ fn fallback_menu() -> Vec<MenuNode> {
     )]))
 }
 
-/// Show the menu; reports whether it is now on screen.
+/// Show the menu; reports whether it is now on screen. Settings are re-read so a
+/// gradient picked in the settings window shows up on the next hotkey.
 fn show_menu(overlay: &Overlay, menu: &[MenuNode]) -> bool {
     if menu.is_empty() {
         tracing::info!("nothing to convert for this selection");
         return false;
     }
-    if let Err(error) = overlay.show(menu) {
+    let settings = Settings::load();
+    if let Err(error) = overlay.show(menu, &settings.gradient) {
         tracing::warn!("overlay show failed: {error:#}");
         return false;
     }
