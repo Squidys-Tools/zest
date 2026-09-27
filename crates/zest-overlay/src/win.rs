@@ -16,12 +16,14 @@ use windows::{
             Direct2D::{
                 Common::{
                     D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-                    D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
+                    D2D1_FILL_MODE_WINDING, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
                 },
-                D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1PathGeometry,
-                ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
+                D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory,
+                ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush,
+                ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
                 D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE,
-                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES,
+                D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_1_0,
+                D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
                 D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
                 D2D1_SWEEP_DIRECTION_CLOCKWISE,
             },
@@ -40,12 +42,12 @@ use windows::{
             },
             WindowsAndMessaging::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-                GetMessageW, GetWindowLongPtrW, PostMessageW, PostQuitMessage, RegisterClassExW,
-                SetWindowLongPtrW, ShowWindow, TranslateMessage, UnregisterClassW,
-                UpdateLayeredWindow, CREATESTRUCTW, GWLP_USERDATA, MSG, SW_HIDE, SW_SHOWNOACTIVATE,
-                ULW_ALPHA, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-                WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+                GetMessageW, GetWindowLongPtrW, KillTimer, PostMessageW, PostQuitMessage,
+                RegisterClassExW, SetTimer, SetWindowLongPtrW, ShowWindow, TranslateMessage,
+                UnregisterClassW, UpdateLayeredWindow, CREATESTRUCTW, GWLP_USERDATA, MSG, SW_HIDE,
+                SW_SHOWNOACTIVATE, ULW_ALPHA, WM_APP, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
+                WM_HOTKEY, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCCREATE, WM_NCDESTROY, WM_TIMER,
+                WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -53,22 +55,48 @@ use windows::{
 
 use windows::Win32::Graphics::Gdi::AC_SRC_ALPHA;
 
-use super::{Click, MenuChoices, RingModel, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS};
-use zest_core::{MenuAction, MenuNode};
+use super::{
+    default_gradient, gradient_stops, Click, MenuChoices, PendingOverlay, Rgba, RingModel, Sector,
+    SectorEmphasis, ANIMATION_FRAME_MS, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS,
+};
+use zest_core::{Gradient, MenuAction, MenuNode};
 
 const OVERLAY_SIZE: i32 = OVERLAY_SIZE_F32 as i32;
 const ESCAPE_HOTKEY_ID: i32 = 0x5A57;
+const ANIMATION_TIMER_ID: usize = 0x5A58;
 const WM_APP_SHOW: u32 = WM_APP + 1;
 const WM_APP_HIDE: u32 = WM_APP + 2;
 const WM_APP_CLOSE: u32 = WM_APP + 3;
 const CLASS_NAME: &str = "ZestOverlayWindow";
 const WINDOW_TITLE: &str = "Zest Overlay";
 
+/// Inactive sector: muted dark gray, thin border, per the feel contract.
+const INACTIVE_FILL: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.22,
+    g: 0.24,
+    b: 0.28,
+    a: 0.82,
+};
+const INACTIVE_BORDER: D2D1_COLOR_F = D2D1_COLOR_F {
+    r: 0.38,
+    g: 0.40,
+    b: 0.46,
+    a: 0.95,
+};
+/// Lit sector: the configured gradient, near-opaque over the muted fill.
+const ACTIVE_ALPHA: f32 = 0.98;
+
+/// How lit each sector was on the last frame the renderer drew. It writes this
+/// and the Windows tests read it, which is the only way to see the fade from
+/// outside the message loop.
+#[cfg(test)]
+static LIT_SECTORS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+
 pub struct Overlay {
     thread: Option<JoinHandle<()>>,
     window: Arc<AtomicIsize>,
     visible: Arc<AtomicBool>,
-    pending_model: Arc<Mutex<Option<RingModel>>>,
+    pending: Arc<Mutex<Option<PendingOverlay>>>,
 }
 
 impl Overlay {
@@ -77,19 +105,19 @@ impl Overlay {
     pub fn precreate() -> Result<(Self, MenuChoices)> {
         let visible = Arc::new(AtomicBool::new(false));
         let window = Arc::new(AtomicIsize::new(0));
-        let pending_model = Arc::new(Mutex::new(None));
+        let pending = Arc::new(Mutex::new(None));
         let (choice_tx, choice_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let thread_visible = Arc::clone(&visible);
         let thread_window = Arc::clone(&window);
-        let thread_pending_model = Arc::clone(&pending_model);
+        let thread_pending = Arc::clone(&pending);
         let thread = std::thread::Builder::new()
             .name("zest-overlay".into())
             .spawn(move || {
                 overlay_thread(
                     thread_visible,
                     thread_window,
-                    thread_pending_model,
+                    thread_pending,
                     choice_tx,
                     ready_tx,
                 )
@@ -113,7 +141,7 @@ impl Overlay {
                 thread: Some(thread),
                 window,
                 visible,
-                pending_model,
+                pending,
             },
             MenuChoices {
                 receiver: choice_rx,
@@ -121,18 +149,22 @@ impl Overlay {
         ))
     }
 
-    /// Show `menu` at the cursor. Picking a category replaces the ring;
-    /// picking a leaf closes the overlay and hands back the action.
-    pub fn show(&self, menu: &[MenuNode]) -> Result<()> {
+    /// Show `menu` at the cursor, lit with the configured sector `gradient`.
+    /// Picking a category replaces the ring; picking a leaf closes the overlay
+    /// and hands back the action.
+    pub fn show(&self, menu: &[MenuNode], gradient: &Gradient) -> Result<()> {
         if menu.is_empty() {
             return Err(anyhow!("overlay menu is empty"));
         }
         {
             let mut pending = self
-                .pending_model
+                .pending
                 .lock()
                 .map_err(|_| anyhow!("overlay model lock poisoned"))?;
-            *pending = Some(RingModel::new(menu.to_vec()));
+            *pending = Some(PendingOverlay {
+                ring: RingModel::new(menu.to_vec()),
+                gradient: gradient.clone(),
+            });
         }
         post(self.hwnd(), WM_APP_SHOW)
     }
@@ -171,11 +203,11 @@ fn post(hwnd: HWND, message: u32) -> Result<()> {
 fn overlay_thread(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
-    pending_model: Arc<Mutex<Option<RingModel>>>,
+    pending: Arc<Mutex<Option<PendingOverlay>>>,
     choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ready: mpsc::SyncSender<Result<()>>,
 ) {
-    match run_overlay(visible, window, pending_model, choices, &ready) {
+    match run_overlay(visible, window, pending, choices, &ready) {
         Ok(()) => {}
         Err(error) => {
             let _ = ready.send(Err(error));
@@ -186,7 +218,7 @@ fn overlay_thread(
 fn run_overlay(
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
-    pending_model: Arc<Mutex<Option<RingModel>>>,
+    pending: Arc<Mutex<Option<PendingOverlay>>>,
     choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ready: &mpsc::SyncSender<Result<()>>,
 ) -> Result<()> {
@@ -194,18 +226,14 @@ fn run_overlay(
     let instance = HINSTANCE(instance.0);
     register_class(instance)?;
 
-    let state = match NativeOverlay::new(
-        Arc::clone(&visible),
-        Arc::clone(&window),
-        pending_model,
-        choices,
-    ) {
-        Ok(state) => state,
-        Err(error) => {
-            unregister_class(instance);
-            return Err(error);
-        }
-    };
+    let state =
+        match NativeOverlay::new(Arc::clone(&visible), Arc::clone(&window), pending, choices) {
+            Ok(state) => state,
+            Err(error) => {
+                unregister_class(instance);
+                return Err(error);
+            }
+        };
     let state_ptr = Box::into_raw(Box::new(state));
     let class_name = wide(CLASS_NAME);
     let window_title = wide(WINDOW_TITLE);
@@ -302,7 +330,7 @@ struct NativeOverlay {
     hwnd: HWND,
     visible: Arc<AtomicBool>,
     window: Arc<AtomicIsize>,
-    pending_model: Arc<Mutex<Option<RingModel>>>,
+    pending: Arc<Mutex<Option<PendingOverlay>>>,
     choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     memory_dc: windows::Win32::Graphics::Gdi::HDC,
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
@@ -313,6 +341,14 @@ struct NativeOverlay {
     factory: ID2D1Factory,
     ring: RingModel,
     active_sector: Option<usize>,
+    /// Per-sector hover fades, 0 inactive to 1 lit.
+    emphasis: SectorEmphasis,
+    /// The configured gradient, one entry per brush stop.
+    stops: Vec<Rgba>,
+    /// Mean of `stops`: the flat color borders and the no-brush fallback use.
+    accent: D2D1_COLOR_F,
+    /// One gradient brush per sector on the current ring, along its own radius.
+    sector_brushes: Vec<Option<ID2D1LinearGradientBrush>>,
     origin: Option<POINT>,
 }
 
@@ -320,7 +356,7 @@ impl NativeOverlay {
     fn new(
         visible: Arc<AtomicBool>,
         window: Arc<AtomicIsize>,
-        pending_model: Arc<Mutex<Option<RingModel>>>,
+        pending: Arc<Mutex<Option<PendingOverlay>>>,
         choices: tokio::sync::mpsc::UnboundedSender<MenuAction>,
     ) -> Result<Self> {
         unsafe {
@@ -441,7 +477,7 @@ impl NativeOverlay {
                 hwnd: HWND(std::ptr::null_mut()),
                 visible,
                 window,
-                pending_model,
+                pending,
                 choices,
                 memory_dc,
                 bitmap,
@@ -452,6 +488,15 @@ impl NativeOverlay {
                 _stroke_brush: Some(stroke_brush),
                 ring: RingModel::default(),
                 active_sector: None,
+                emphasis: SectorEmphasis::new(0),
+                stops: default_gradient(),
+                accent: D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 0.54,
+                    b: 0.24,
+                    a: 1.0,
+                },
+                sector_brushes: Vec::new(),
                 origin: None,
             };
             state.redraw_surface()?;
@@ -459,8 +504,8 @@ impl NativeOverlay {
         }
     }
 
-    fn take_pending_model(&self) -> Option<RingModel> {
-        self.pending_model
+    fn take_pending(&self) -> Option<PendingOverlay> {
+        self.pending
             .lock()
             .ok()
             .and_then(|mut pending| pending.take())
@@ -476,7 +521,122 @@ impl NativeOverlay {
         let _ = unsafe { TrackMouseEvent(&mut tracking) };
     }
 
-    fn create_sector_geometry(&self, sector: &super::Sector) -> Result<ID2D1PathGeometry> {
+    /// The gradient brush for one sector: the configured stops swept along that
+    /// sector's own radius, inner edge to outer edge.
+    fn create_sector_brush(
+        &self,
+        sector: &Sector,
+        stops: &[Rgba],
+    ) -> Result<ID2D1LinearGradientBrush> {
+        let render_target = self
+            ._render_target
+            .as_ref()
+            .ok_or_else(|| anyhow!("overlay render target unavailable"))?;
+        let collection = unsafe {
+            render_target
+                .CreateGradientStopCollection(
+                    &gradient_stop_array(stops),
+                    D2D1_GAMMA_1_0,
+                    D2D1_EXTEND_MODE_CLAMP,
+                )
+                .context("create sector gradient stops")
+        }?;
+        let center = OVERLAY_SIZE_F32 / 2.0;
+        let (sin, cos) = (sector.center.sin() as f32, sector.center.cos() as f32);
+        let mut start = D2D1_ELLIPSE::default().point;
+        start.X = center + cos * super::RING_INNER_RADIUS;
+        start.Y = center + sin * super::RING_INNER_RADIUS;
+        let mut end = D2D1_ELLIPSE::default().point;
+        end.X = center + cos * RING_OUTER_RADIUS;
+        end.Y = center + sin * RING_OUTER_RADIUS;
+        let brush_properties = D2D1_BRUSH_PROPERTIES {
+            opacity: 1.0,
+            ..Default::default()
+        };
+        unsafe {
+            render_target
+                .CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: start,
+                        endPoint: end,
+                    },
+                    Some(&brush_properties),
+                    &collection,
+                )
+                .context("create sector gradient brush")
+        }
+    }
+
+    /// Rebuild the per-sector brushes for the ring on screen. A sector whose
+    /// brush could not be created falls back to the flat accent.
+    fn build_sector_brushes(&mut self) {
+        let stops = self.stops.clone();
+        self.sector_brushes = self
+            .ring
+            .sectors
+            .iter()
+            .map(|sector| match self.create_sector_brush(sector, &stops) {
+                Ok(brush) => Some(brush),
+                Err(error) => {
+                    tracing::warn!("sector gradient unavailable: {error:#}");
+                    None
+                }
+            })
+            .collect();
+    }
+
+    /// Adopt a freshly handed-over ring, with the gradient the app configured.
+    fn set_ring(&mut self, pending: PendingOverlay) {
+        self.stops = gradient_stops(&pending.gradient.0);
+        self.accent = mean_color(&self.stops);
+        self.ring = pending.ring;
+        self.relayout_ring();
+    }
+
+    /// The ring on screen changed shape: point the brushes at the new sector
+    /// angles and start it dark.
+    fn relayout_ring(&mut self) {
+        self.emphasis.reset(self.ring.sectors.len());
+        self.active_sector = None;
+        self.build_sector_brushes();
+        #[cfg(test)]
+        {
+            *LIT_SECTORS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Vec::new();
+        }
+    }
+
+    /// Point the hover at `active`, starting the fade that eases it in.
+    fn set_active_sector(&mut self, active: Option<usize>) {
+        self.active_sector = active;
+        self.emphasis.set_active(self.ring.sectors.len(), active);
+        self.start_animation();
+    }
+
+    fn start_animation(&self) {
+        unsafe {
+            SetTimer(
+                Some(self.hwnd),
+                ANIMATION_TIMER_ID,
+                ANIMATION_FRAME_MS as u32,
+                None,
+            );
+        }
+    }
+
+    fn stop_animation(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), ANIMATION_TIMER_ID);
+        }
+    }
+
+    /// One frame of the hover fade. Reports whether another frame is due.
+    fn advance_animation(&mut self) -> bool {
+        self.emphasis.advance(ANIMATION_FRAME_MS)
+    }
+
+    fn create_sector_geometry(&self, sector: &Sector) -> Result<ID2D1PathGeometry> {
         let start_angle = sector.center - sector.width / 2.0;
         let end_angle = start_angle + sector.width;
         let center = OVERLAY_SIZE_F32 / 2.0;
@@ -547,45 +707,60 @@ impl NativeOverlay {
                     b: 0.0,
                     a: 0.0,
                 }));
+                #[cfg(test)]
+                {
+                    *LIT_SECTORS
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.emphasis.values();
+                }
                 for (index, sector) in self.ring.sectors.iter().enumerate() {
-                    let active = self.active_sector == Some(index);
-                    let fill = if active {
-                        D2D1_COLOR_F {
-                            r: 1.0,
-                            g: 0.54,
-                            b: 0.24,
-                            a: 0.98,
-                        }
-                    } else {
-                        D2D1_COLOR_F {
-                            r: 0.22,
-                            g: 0.24,
-                            b: 0.28,
-                            a: 0.82,
-                        }
+                    let emphasis = self.emphasis.value(index);
+                    let full = sector.width >= std::f64::consts::TAU - f64::EPSILON;
+                    let geometry = match full {
+                        true => None,
+                        false => Some(self.create_sector_geometry(sector)?),
                     };
+                    let gradient = match emphasis > 0.0 {
+                        true => self.sector_brushes.get(index).and_then(Option::as_ref),
+                        false => None,
+                    };
+                    let fill = match gradient {
+                        Some(_) => INACTIVE_FILL,
+                        None => mix_color(INACTIVE_FILL, self.accent, emphasis),
+                    };
+                    let border = mix_color(
+                        INACTIVE_BORDER,
+                        D2D1_COLOR_F {
+                            a: INACTIVE_BORDER.a,
+                            ..self.accent
+                        },
+                        emphasis,
+                    );
                     fill_brush.SetColor(&fill);
-                    stroke_brush.SetColor(&D2D1_COLOR_F {
-                        r: fill.r,
-                        g: fill.g,
-                        b: fill.b,
-                        a: 0.95,
-                    });
-                    if sector.width >= std::f64::consts::TAU - f64::EPSILON {
-                        render_target.FillEllipse(&outer, fill_brush);
+                    stroke_brush.SetColor(&border);
+                    SectorBrush::Solid(fill_brush).fill(
+                        render_target,
+                        full,
+                        geometry.as_ref(),
+                        &outer,
+                    )?;
+                    if let Some(brush) = gradient {
+                        brush.SetOpacity(emphasis * ACTIVE_ALPHA);
+                        SectorBrush::Gradient(brush).fill(
+                            render_target,
+                            full,
+                            geometry.as_ref(),
+                            &outer,
+                        )?;
+                    }
+                    if full {
                         render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
-                    } else {
-                        let geometry = self.create_sector_geometry(sector)?;
-                        render_target.FillGeometry(
-                            &geometry,
-                            fill_brush,
-                            None::<&windows::Win32::Graphics::Direct2D::ID2D1Brush>,
-                        );
+                    } else if let Some(geometry) = &geometry {
                         render_target.DrawGeometry(
-                            &geometry,
+                            geometry,
                             stroke_brush,
                             1.5,
-                            None::<&windows::Win32::Graphics::Direct2D::ID2D1StrokeStyle>,
+                            None::<&ID2D1StrokeStyle>,
                         );
                     }
                 }
@@ -690,6 +865,7 @@ impl NativeOverlay {
     }
 
     fn hide(&self) -> Result<()> {
+        self.stop_animation();
         if self.visible.swap(false, Ordering::AcqRel) {
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), ESCAPE_HOTKEY_ID) };
         }
@@ -702,13 +878,85 @@ impl NativeOverlay {
 
 impl Drop for NativeOverlay {
     fn drop(&mut self) {
+        self.stop_animation();
         if self.visible.swap(false, Ordering::AcqRel) {
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), ESCAPE_HOTKEY_ID) };
         }
         self._stroke_brush.take();
         self._fill_brush.take();
+        self.sector_brushes.clear();
         self._render_target.take();
         unsafe { release_dc(self.memory_dc, self.old_bitmap, self.bitmap) };
+    }
+}
+
+/// A sector is painted either with the flat muted fill or, as it lights up,
+/// with the configured gradient over that fill.
+enum SectorBrush<'a> {
+    Solid(&'a ID2D1SolidColorBrush),
+    Gradient(&'a ID2D1LinearGradientBrush),
+}
+
+impl SectorBrush<'_> {
+    fn fill(
+        &self,
+        render_target: &ID2D1DCRenderTarget,
+        full_circle: bool,
+        geometry: Option<&ID2D1PathGeometry>,
+        outer: &D2D1_ELLIPSE,
+    ) -> Result<()> {
+        let brush: &ID2D1Brush = match self {
+            SectorBrush::Solid(brush) => brush,
+            SectorBrush::Gradient(brush) => brush,
+        };
+        unsafe {
+            if full_circle {
+                render_target.FillEllipse(outer, brush);
+            } else if let Some(geometry) = geometry {
+                render_target.FillGeometry(geometry, brush, None::<&ID2D1Brush>);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Spread `stops` evenly across the brush's 0.0..=1.0 range.
+fn gradient_stop_array(stops: &[Rgba]) -> Vec<D2D1_GRADIENT_STOP> {
+    let span = (stops.len().saturating_sub(1)).max(1) as f32;
+    stops
+        .iter()
+        .enumerate()
+        .map(|(index, stop)| D2D1_GRADIENT_STOP {
+            position: index as f32 / span,
+            color: D2D1_COLOR_F {
+                r: stop.r,
+                g: stop.g,
+                b: stop.b,
+                a: stop.a,
+            },
+        })
+        .collect()
+}
+
+/// One flat color for a gradient: what borders, and the no-brush fallback, use.
+fn mean_color(stops: &[Rgba]) -> D2D1_COLOR_F {
+    let count = stops.len().max(1) as f32;
+    let mean = |channel: fn(&Rgba) -> f32| stops.iter().map(channel).sum::<f32>() / count;
+    D2D1_COLOR_F {
+        r: mean(|stop| stop.r),
+        g: mean(|stop| stop.g),
+        b: mean(|stop| stop.b),
+        a: 1.0,
+    }
+}
+
+fn mix_color(from: D2D1_COLOR_F, to: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F {
+    let mix = |from: f32, to: f32| from + (to - from) * amount;
+    D2D1_COLOR_F {
+        r: mix(from.r, to.r),
+        g: mix(from.g, to.g),
+        b: mix(from.b, to.b),
+        a: mix(from.a, to.a),
     }
 }
 
@@ -760,9 +1008,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_APP_SHOW => {
             if let Some(state) = state {
-                if let Some(model) = state.take_pending_model() {
-                    state.ring = model;
-                    state.active_sector = None;
+                if let Some(pending) = state.take_pending() {
+                    state.set_ring(pending);
                 }
                 if let Err(error) = state.show() {
                     tracing::warn!("overlay show failed: {error:#}");
@@ -775,10 +1022,21 @@ unsafe extern "system" fn window_proc(
                 state.track_mouse_leave();
                 let active = state.ring.hit_test(point_from_lparam(lparam));
                 if active != state.active_sector {
-                    state.active_sector = active;
+                    state.set_active_sector(active);
                     if let Err(error) = state.redraw_and_present() {
                         tracing::warn!("overlay redraw failed: {error:#}");
                     }
+                }
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
+        WM_TIMER if wparam.0 == ANIMATION_TIMER_ID => {
+            if let Some(state) = state {
+                if !state.advance_animation() {
+                    state.stop_animation();
+                }
+                if let Err(error) = state.redraw_and_present() {
+                    tracing::warn!("overlay hover animation failed: {error:#}");
                 }
             }
             windows::Win32::Foundation::LRESULT(0)
@@ -788,7 +1046,7 @@ unsafe extern "system" fn window_proc(
                 if let Some(index) = state.ring.hit_test(point_from_lparam(lparam)) {
                     match state.ring.click(index) {
                         Click::Expanded => {
-                            state.active_sector = None;
+                            state.relayout_ring();
                             if let Err(error) = state.redraw_and_present() {
                                 tracing::warn!("overlay ring expansion failed: {error:#}");
                             }
@@ -809,7 +1067,8 @@ unsafe extern "system" fn window_proc(
         }
         WM_MOUSELEAVE => {
             if let Some(state) = state {
-                if state.active_sector.take().is_some() {
+                if state.active_sector.is_some() {
+                    state.set_active_sector(None);
                     if let Err(error) = state.redraw_and_present() {
                         tracing::warn!("overlay hover clear failed: {error:#}");
                     }
@@ -845,6 +1104,7 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetCursorPos};
 
     static NATIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -871,7 +1131,9 @@ mod tests {
         let _guard = native_test_guard();
         let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
         assert!(!overlay.is_visible());
-        overlay.show(&test_menu()).expect("show overlay");
+        overlay
+            .show(&test_menu(), &Gradient::default())
+            .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
         unsafe {
             PostMessageW(
@@ -889,7 +1151,9 @@ mod tests {
     fn clicking_a_leaf_reports_its_action() {
         let _guard = native_test_guard();
         let (overlay, mut choices) = Overlay::precreate().expect("precreate overlay");
-        overlay.show(&test_menu()).expect("show overlay");
+        overlay
+            .show(&test_menu(), &Gradient::default())
+            .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
 
         // Ring 1: "Convert" sits at the top, so a click straight up expands it.
@@ -911,6 +1175,63 @@ mod tests {
             })
         );
         assert!(wait_for(|| !overlay.is_visible()));
+    }
+
+    #[test]
+    fn hovering_a_sector_lights_it_with_the_configured_gradient() {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        overlay
+            .show(
+                &test_menu(),
+                &Gradient(vec!["#00ff00".to_string(), "#0000ff".to_string()]),
+            )
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+        assert!(
+            lit_sectors().iter().all(|lit| *lit == 0.0),
+            "nothing is lit before the cursor arrives, read {:?}",
+            lit_sectors()
+        );
+
+        let lit =
+            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        assert_eq!(lit.len(), 2, "the ring has two sectors");
+        assert_eq!(
+            lit.iter().filter(|value| **value > 0.99).count(),
+            1,
+            "exactly one sector should be lit, read {lit:?}"
+        );
+        assert!(
+            lit.iter().all(|value| *value == 0.0 || *value > 0.99),
+            "the unlit sectors should stay dark, read {lit:?}"
+        );
+    }
+
+    #[test]
+    fn moving_off_a_sector_fades_it_back_out() {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        overlay
+            .show(&test_menu(), &Gradient::default())
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+
+        let lit =
+            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        let sector = lit
+            .iter()
+            .position(|value| *value > 0.99)
+            .unwrap_or_else(|| panic!("a sector should be lit, read {lit:?}"));
+        let dark = hover_until_settled(&overlay, Target::Centre, &lit).expect("cursor stayed put");
+        assert!(
+            dark.iter().all(|value| *value < 0.01),
+            "leaving the ring should fade every sector back out, read {dark:?} after {lit:?}"
+        );
+        assert!(
+            dark[sector] < 0.01,
+            "sector {sector} was left lit in {dark:?}"
+        );
     }
 
     #[test]
@@ -948,6 +1269,71 @@ mod tests {
         let lparam = LPARAM(((y as i32 as isize) << 16) | (x as i32 as isize));
         unsafe { PostMessageW(Some(overlay.hwnd()), WM_LBUTTONUP, WPARAM(0), lparam) }
             .expect("post left button up");
+    }
+
+    /// Where to leave the real cursor.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Target {
+        /// A spot out over the ring, lighting a sector up.
+        Ring,
+        /// The dead centre in the middle of the ring, where nothing is lit.
+        Centre,
+    }
+
+    /// Leave the real cursor on `target` and wait for the hover to finish
+    /// easing, then report how lit every sector was on the last frame.
+    /// `previous` is the last snapshot this test read, so waiting for a
+    /// *change* is how a second hover is told from a leftover. Real mouse input
+    /// is deliberate: it is what drives the fade, and a posted move would fight
+    /// the cursor Windows keeps delivering for the real one.
+    fn hover_until_settled(
+        overlay: &Overlay,
+        target: Target,
+        previous: &[f32],
+    ) -> Option<Vec<f32>> {
+        let mut rect = RECT::default();
+        unsafe { GetWindowRect(overlay.hwnd(), &mut rect) }.ok()?;
+        let mut was = POINT::default();
+        unsafe { GetCursorPos(&mut was) }.ok()?;
+        let centre = POINT {
+            x: (rect.left + rect.right) / 2,
+            y: (rect.top + rect.bottom) / 2,
+        };
+        let reached = match target {
+            Target::Centre => unsafe { SetCursorPos(centre.x, centre.y) }.is_ok(),
+            // The window is centred on the cursor, so at least one side of the
+            // ring is on screen unless the desktop is smaller than the ring.
+            Target::Ring => [centre.y - 80, centre.y + 80]
+                .into_iter()
+                .any(|y| unsafe { SetCursorPos(centre.x, y) }.is_ok()),
+        };
+        if !reached {
+            return None;
+        }
+
+        for _ in 0..100 {
+            let lit = lit_sectors();
+            let settled = match target {
+                Target::Centre => lit.iter().all(|value| *value < 0.01),
+                Target::Ring => lit.iter().any(|value| *value > 0.99),
+            };
+            if lit != previous && settled {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let lit = lit_sectors();
+        unsafe {
+            let _ = SetCursorPos(was.x, was.y);
+        }
+        Some(lit)
+    }
+
+    fn lit_sectors() -> Vec<f32> {
+        LIT_SECTORS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     fn wait_for(condition: impl Fn() -> bool) -> bool {

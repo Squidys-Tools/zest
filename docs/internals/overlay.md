@@ -32,6 +32,25 @@ and owns only pixels, blur, and animation. Native precreate, activation, and
 the leaf-click-to-channel path are covered by the overlay crate's Windows
 tests.
 
+## Hover animation
+
+`SectorEmphasis` is the testable half of the hover: a lit amount per sector,
+eased from 0 to 1 over `SECTOR_TRANSITION_MS` and re-aimable mid-fade without
+jumping. The renderer owns the frame timer: a hover change starts a `WM_TIMER`
+at `ANIMATION_FRAME_MS`, each tick advances the fades and repaints, and the
+timer is killed once every fade settles — so an idle ring costs nothing.
+
+The active sector is the muted fill with the configured gradient painted over
+it at `emphasis` opacity, which cross-fades in both directions from one brush
+per sector. Those brushes are built from the `Gradient` in settings: stops are
+parsed to straight-alpha colors, spread evenly over the brush, and swept along
+that sector's own radius from the inner edge to the outer edge. A sector whose
+brush could not be created falls back to the flat mean color, so a gradient
+failure costs the sweep and not the hover.
+
+Settings are re-read on every show, so a gradient picked in the settings window
+shows up on the next hotkey without a restart.
+
 ## Choice channel
 
 `Overlay::precreate()` returns the overlay plus a `MenuChoices` receiver. The

@@ -15,8 +15,8 @@ pub use menu::{
 };
 pub use naming::{output_path_for, unique_sibling_path};
 pub use settings::{
-    OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY,
-    DEFAULT_HOTKEY,
+    Gradient, OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset,
+    DEFAULT_CONVERT_HOTKEY, DEFAULT_HOTKEY,
 };
 
 use std::path::PathBuf;

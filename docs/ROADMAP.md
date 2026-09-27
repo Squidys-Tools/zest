@@ -35,7 +35,7 @@ Exit: press hotkey → circle at cursor; press Esc → gone.
 - [x] Sectors, cursor-angle hit-testing, ring expansion/replacement.
 - [x] Ring 1 filtering (PNG → Convert+Archive; zip → Extract; mixed → Archive).
 - [x] Complete ring 2 fan-out per category and leaf action dispatch; Convert ring via either hotkey path.
-- [ ] ~200ms ease-out sector transitions; gradient active sector (1–3 colors).
+- [x] ~200ms ease-out sector transitions; gradient active sector (1–3 colors).
 - [ ] Center thumbnail / multi-file count badge; Segoe UI Variable; Lucide icons.
 - [ ] Acrylic/mica blur when available; dark-mode default.
 - [x] Pre-created hidden window reveal (no build-on-open).
