@@ -83,8 +83,6 @@ const INACTIVE_BORDER: D2D1_COLOR_F = D2D1_COLOR_F {
     b: 0.46,
     a: 0.95,
 };
-/// Lit sector: the configured gradient, near-opaque over the muted fill.
-const ACTIVE_ALPHA: f32 = 0.98;
 
 /// How lit each sector was on the last frame the renderer drew. It writes this
 /// and the Windows tests read it, which is the only way to see the fade from
@@ -606,27 +604,31 @@ impl NativeOverlay {
 
     /// Rebuild the per-sector bands for the ring on screen. A sector whose bands
     /// could not be built falls back to the flat accent.
-    fn build_band_geometry(&mut self) {
-        self.band_geometry = self
-            .ring
-            .sectors
-            .iter()
-            .map(|sector| {
-                let bands = (0..RAMP_BANDS)
-                    .map(|index| {
-                        let (inner, outer) = band_radii(index);
-                        self.create_band_geometry(sector, inner, outer)
-                    })
-                    .collect::<Result<Vec<_>>>();
-                match bands {
-                    Ok(bands) => Some(bands),
-                    Err(error) => {
-                        tracing::warn!("sector ramp unavailable: {error:#}");
-                        None
-                    }
-                }
+    /// Build the ramp bands for one sector, unless they are already there.
+    /// Only a lit sector ever needs them, and 48 paths per sector built on every
+    /// show and every submenu expansion is work nobody asked for.
+    fn ensure_band_geometry(&mut self, index: usize) {
+        if self.band_geometry.get(index).is_some_and(Option::is_some) {
+            return;
+        }
+        let Some(sector) = self.ring.sectors.get(index) else {
+            return;
+        };
+        let built = (0..RAMP_BANDS)
+            .map(|band| {
+                let (inner, outer) = band_radii(band);
+                self.create_band_geometry(sector, inner, outer)
             })
-            .collect();
+            .collect::<Result<Vec<_>>>();
+        match built {
+            Ok(bands) => {
+                self.band_geometry[index] = Some(bands);
+            }
+            Err(error) => {
+                tracing::warn!("sector ramp unavailable: {error:#}");
+                self.band_geometry[index] = None;
+            }
+        }
     }
 
     /// Adopt a freshly handed-over ring, with the gradient the app configured.
@@ -642,7 +644,9 @@ impl NativeOverlay {
     fn relayout_ring(&mut self) {
         self.emphasis.reset(self.ring.sectors.len());
         self.active_sector = None;
-        self.build_band_geometry();
+        // Bands belong to the shape on screen, so the new ring invalidates them.
+        // They are rebuilt per sector the first time that sector lights up.
+        self.band_geometry = (0..self.ring.sectors.len()).map(|_| None).collect();
         #[cfg(test)]
         {
             *LIT_SECTORS
@@ -654,6 +658,9 @@ impl NativeOverlay {
     /// Point the hover at `active`, starting the fade that eases it in.
     fn set_active_sector(&mut self, active: Option<usize>) {
         self.active_sector = active;
+        if let Some(index) = active {
+            self.ensure_band_geometry(index);
+        }
         self.emphasis.set_active(self.ring.sectors.len(), active);
         self.start_animation();
     }
@@ -785,16 +792,28 @@ impl NativeOverlay {
                     stroke_brush.SetColor(&border);
                     fill_sector(render_target, fill_brush, full, geometry.as_ref(), &outer)?;
                     if let Some(bands) = bands {
+                        // Bands are painted opaque so the seam overlap composites
+                        // to the same colour whichever band wins it. Two
+                        // translucent fills in that overlap would add up, and the
+                        // ramp would show radial seams while the fade runs.
                         for (offset, band) in bands.iter().enumerate() {
-                            let color = ramp_color(&self.stops, (offset as f32 + 0.5) / RAMP_BANDS as f32);
+                            let color =
+                                ramp_color(&self.stops, (offset as f32 + 0.5) / RAMP_BANDS as f32);
                             fill_brush.SetColor(&D2D1_COLOR_F {
                                 r: color.r,
                                 g: color.g,
                                 b: color.b,
-                                a: color.a * emphasis * ACTIVE_ALPHA,
+                                a: 1.0,
                             });
                             fill_sector(render_target, fill_brush, false, Some(band), &outer)?;
                         }
+                        // Fade the whole lit ramp back towards the resting fill in
+                        // one pass, so the ease costs a single blend rather than
+                        // one per band.
+                        let mut veil = INACTIVE_FILL;
+                        veil.a *= 1.0 - emphasis;
+                        fill_brush.SetColor(&veil);
+                        fill_sector(render_target, fill_brush, full, geometry.as_ref(), &outer)?;
                     }
                     if full {
                         render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
@@ -1284,31 +1303,9 @@ mod tests {
         );
     }
 
-    /// Emphasis values prove the fade ran, not that a gradient reached the
-    /// screen. Read the painted pixels across the lit sector: a flat fill gives
-    /// one colour at every radius, which is the bug this pins down.
-    #[test]
-    fn the_lit_sector_paints_a_gradient_rather_than_a_flat_fill() {
-        let _guard = native_test_guard();
-        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
-        // Black to white, so every step outward has to get brighter.
-        overlay
-            .show(
-                &test_menu(),
-                &Gradient::new(vec![
-                    zest_core::HexColor::new(0x00, 0x00, 0x00),
-                    zest_core::HexColor::new(0xff, 0xff, 0xff),
-                ]),
-            )
-            .expect("show overlay");
-        assert!(wait_for(|| overlay.is_visible()));
-
-        RAMP_SAMPLES
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
-        hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
-
+    /// Read back the pixels the renderer painted across the lit sector and insist
+    /// they climb from the inner edge outwards.
+    fn assert_lit_sector_ramps() {
         let samples = RAMP_SAMPLES
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -1334,6 +1331,53 @@ mod tests {
             outer - inner > 24.0,
             "the sector should ramp from near its first stop to near its last, read {samples:?}"
         );
+    }
+
+    /// Show `menu`, light a sector, and insist the painted pixels ramp.
+    fn ramp_over_menu(menu: &[MenuNode], expected_sectors: usize) {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        // Black to white, so every step outward has to get brighter.
+        overlay
+            .show(
+                menu,
+                &Gradient::new(vec![
+                    zest_core::HexColor::new(0x00, 0x00, 0x00),
+                    zest_core::HexColor::new(0xff, 0xff, 0xff),
+                ]),
+            )
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+
+        RAMP_SAMPLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let lit =
+            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        assert_eq!(
+            lit.len(),
+            expected_sectors,
+            "the ring should have {expected_sectors} sectors, read {lit:?}"
+        );
+        assert_lit_sector_ramps();
+    }
+
+    /// A single top-level node is the whole ring, so its one sector takes the
+    /// annulus path instead of the wedge path. That is separate code, and the
+    /// wedge path was itself wrong until its closing arc was turned the right
+    /// way round, so the annulus deserves the same pixel check.
+    #[test]
+    fn a_whole_ring_sector_paints_a_gradient_rather_than_a_flat_fill() {
+        ramp_over_menu(&[leaf_menu("Everything")], 1);
+    }
+
+    /// Emphasis values prove the fade ran, not that a gradient reached the
+    /// screen. Read the painted pixels across the lit sector: a flat fill gives
+    /// one colour at every radius, which is the bug this pins down.
+    #[test]
+    fn the_lit_sector_paints_a_gradient_rather_than_a_flat_fill() {
+        ramp_over_menu(&test_menu(), 2);
     }
 
     #[test]
@@ -1391,6 +1435,15 @@ mod tests {
                 children: Vec::new(),
             },
         ]
+    }
+
+    /// A single top-level node with nothing under it: one sector, full width.
+    fn leaf_menu(label: &str) -> MenuNode {
+        MenuNode {
+            label: label.to_string(),
+            action: None,
+            children: Vec::new(),
+        }
     }
 
     fn click_at(overlay: &Overlay, x: f32, y: f32) {
