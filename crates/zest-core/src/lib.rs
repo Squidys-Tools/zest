@@ -15,8 +15,8 @@ pub use menu::{
 };
 pub use naming::{output_path_for, unique_sibling_path};
 pub use settings::{
-    Gradient, OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset,
-    DEFAULT_CONVERT_HOTKEY, DEFAULT_HOTKEY,
+    Gradient, HexColor, OutputLocation, Settings, Theme, UpdateFrequency, VideoPreset,
+    DEFAULT_CONVERT_HOTKEY, DEFAULT_GRADIENT, DEFAULT_HOTKEY, MAX_GRADIENT_COLORS, SYSTEM_UI_FONT,
 };
 
 use std::path::PathBuf;

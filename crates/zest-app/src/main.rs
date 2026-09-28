@@ -230,8 +230,9 @@ fn show_menu(overlay: &Overlay, menu: &[MenuNode]) -> bool {
         tracing::info!("nothing to convert for this selection");
         return false;
     }
-    let settings = Settings::load();
-    if let Err(error) = overlay.show(menu, &settings.gradient) {
+    // Re-read on every show so a gradient saved in the settings window takes
+    // effect on the next hotkey press, not the next restart.
+    if let Err(error) = overlay.show(menu, &Settings::load().gradient) {
         tracing::warn!("overlay show failed: {error:#}");
         return false;
     }
@@ -294,8 +295,8 @@ async fn run_action(choice: &MenuAction, selection: &Selection) {
     }
 }
 
-/// Open the settings window on its own thread (eframe blocks) without
-/// stacking duplicates when Settings is clicked twice.
+/// Open the settings window on its own thread (gpui owns the message loop)
+/// without stacking duplicates when Settings is clicked twice.
 fn open_settings(startup_notice: Option<String>) {
     if SETTINGS_OPEN.swap(true, Ordering::SeqCst) {
         tracing::info!("settings window already open");

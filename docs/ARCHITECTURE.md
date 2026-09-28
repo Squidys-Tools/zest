@@ -35,7 +35,7 @@ hotkey (shell) → selection.resolve() (COM) → core::menu (MenuNode tree)
 | zest-convert | `dispatch()` → image/media/text/archive modules; ffmpeg presence check; GIF caps; md→pdf simple | image, resvg, tokio(process), zip, tar, flate2, serde_*, csv, quick-xml, toml |
 | zest-shell | tray icon, global hotkeys (default Shift+F; Shift+C opens Convert), toast, HKCU Run startup, GitHub Releases updater | tray-icon, global-hotkey, windows (Notifications, Registry), reqwest, semver |
 | zest-overlay | sector geometry + angle hit-test, ring model over the `MenuNode` tree, choice channel, 200ms ease-out, acrylic/mica + gradient theme, center thumbnail/count | windows (Direct2D), core menu |
-| zest-settings | eframe/egui form: hotkey recorder, quality, output, theme, font, 1–3 gradient colors, startup, update cadence, lossy-warning toggle | eframe, core Settings |
+| zest-settings | gpui form: hotkey recorder, quality, output, theme, font, 1–3 gradient colors, startup, update cadence, lossy-warning toggle | gpui, core Settings |
 | zest-app | clap CLI, single-instance note, tokio main wiring | tokio, clap, tracing |
 
 ## Menu model (PRD §How It Works)

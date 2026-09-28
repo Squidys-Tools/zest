@@ -40,7 +40,10 @@ tar = "0.4"
 flate2 = "1.0"
 tray-icon = "0.20"
 global-hotkey = "0.6"
-eframe = "0.32"
+# Zed's UI framework. `default-features = false` drops the Wayland/X11/font-kit
+# stack we neither need nor ship; on Windows it uses D3D11On12 and DirectWrite,
+# which are system DLLs.
+gpui = { version = "0.2.2", default-features = false }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Com",

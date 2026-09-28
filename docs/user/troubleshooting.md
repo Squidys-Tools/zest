@@ -27,8 +27,7 @@
 
 ## Build fails with `cannot find -lshlwapi`
 
-You are building for `x86_64-pc-windows-gnu` and Rust's bundled MinGW
-sysroot is missing `libshlwapi.a`. Pull the latest changes — `zest-app`
-now vendors a minimal import library under `crates/zest-app/gnu-libs/`
-and wires it in via `build.rs`. MSVC builds were never affected. See
+Nothing in the dependency graph links `shlwapi` any more, so this is stale
+state rather than a real gap. Build MSVC (`cargo build -p zest-app`) or
+clear the target directory and rebuild. See
 `docs/operations/development.md`.
