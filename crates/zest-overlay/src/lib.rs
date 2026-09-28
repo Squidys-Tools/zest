@@ -84,6 +84,38 @@ pub fn gradient_stops(colors: &[HexColor]) -> Vec<Rgba> {
     }
 }
 
+/// The gradient's colour at `t` across its 0.0..=1.0 span. The overlay paints the
+/// ramp as flat bands, because a linear gradient brush does not ramp on the
+/// GDI-compatible render target, so this is what turns the stop list back into a
+/// gradient one band at a time.
+pub fn ramp_color(stops: &[Rgba], t: f32) -> Rgba {
+    let opaque = Rgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+    let Some(first) = stops.first().copied() else {
+        return opaque;
+    };
+    if stops.len() < 2 {
+        return first;
+    }
+    let last = stops.len() - 1;
+    let scaled = t.clamp(0.0, 1.0) * last as f32;
+    let lower = (scaled.floor() as usize).min(last);
+    let upper = (lower + 1).min(last);
+    let mix = scaled - lower as f32;
+    let (from, to) = (stops[lower], stops[upper]);
+    let lerp = |a: f32, b: f32| a + (b - a) * mix;
+    Rgba {
+        r: lerp(from.r, to.r),
+        g: lerp(from.g, to.g),
+        b: lerp(from.b, to.b),
+        a: lerp(from.a, to.a),
+    }
+}
+
 /// Cubic ease-out: quick start, soft landing. `amount` is clamped to 0.0..=1.0.
 pub fn ease_out(amount: f32) -> f32 {
     let amount = amount.clamp(0.0, 1.0);
@@ -477,6 +509,88 @@ mod tests {
         // Stops are typed now, so an unparseable color is not representable;
         // an empty list is the only way to have nothing to draw.
         assert_eq!(gradient_stops(&[]), default_gradient());
+    }
+
+    #[test]
+    fn the_ramp_runs_from_the_first_stop_to_the_last() {
+        let stops = vec![
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        assert!(ramp_color(&stops, 0.0).r < 0.001);
+        assert!((ramp_color(&stops, 0.5).r - 0.5).abs() < 0.001);
+        assert!(ramp_color(&stops, 1.0).r > 0.999);
+    }
+
+    #[test]
+    fn the_ramp_clamps_outside_its_span() {
+        let stops = vec![
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        assert!(ramp_color(&stops, -1.0).r < 0.001);
+        assert!(ramp_color(&stops, 2.0).r > 0.999);
+    }
+
+    #[test]
+    fn a_three_stop_ramp_passes_through_the_middle_one() {
+        let stops = vec![
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        let middle = ramp_color(&stops, 0.5);
+        assert!(
+            (middle.r - 1.0).abs() < 0.001 && middle.b < 0.001,
+            "the halfway band should be the middle stop, read {middle:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_stop_ramp_is_that_colour_everywhere() {
+        let stops = vec![Rgba {
+            r: 0.25,
+            g: 0.5,
+            b: 0.75,
+            a: 1.0,
+        }];
+        assert_eq!(ramp_color(&stops, 0.0), stops[0]);
+        assert_eq!(ramp_color(&stops, 1.0), stops[0]);
     }
 
     #[test]

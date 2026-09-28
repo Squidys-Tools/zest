@@ -16,21 +16,20 @@ use windows::{
             Direct2D::{
                 Common::{
                     D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-                    D2D1_FILL_MODE_WINDING, D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
+                    D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
                 },
                 D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory,
-                ID2D1LinearGradientBrush, ID2D1PathGeometry, ID2D1SolidColorBrush,
+                ID2D1PathGeometry, ID2D1SolidColorBrush,
                 ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
                 D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE,
-                D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_1_0,
-                D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_RENDER_TARGET_PROPERTIES,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES,
                 D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
-                D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Gdi::{
-                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject,
-                BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HGDIOBJ,
+                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
+                HGDIOBJ,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -56,8 +55,9 @@ use windows::{
 use windows::Win32::Graphics::Gdi::AC_SRC_ALPHA;
 
 use super::{
-    default_gradient, gradient_stops, Click, MenuChoices, PendingOverlay, Rgba, RingModel, Sector,
-    SectorEmphasis, ANIMATION_FRAME_MS, OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_OUTER_RADIUS,
+    default_gradient, gradient_stops, ramp_color, Click, MenuChoices, PendingOverlay, Rgba,
+    RingModel, Sector, SectorEmphasis, ANIMATION_FRAME_MS, OVERLAY_SIZE as OVERLAY_SIZE_F32,
+    RING_OUTER_RADIUS,
 };
 use zest_core::{Gradient, MenuAction, MenuNode};
 
@@ -91,6 +91,12 @@ const ACTIVE_ALPHA: f32 = 0.98;
 /// outside the message loop.
 #[cfg(test)]
 static LIT_SECTORS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
+
+/// Colours the renderer actually painted across a lit sector, sampled along that
+/// sector's radius from the inner edge outwards. Emphasis values only say the
+/// fade ran; these say whether a gradient reached the screen at all.
+#[cfg(test)]
+static RAMP_SAMPLES: Mutex<Vec<(f32, u32)>> = Mutex::new(Vec::new());
 
 pub struct Overlay {
     thread: Option<JoinHandle<()>>,
@@ -347,8 +353,8 @@ struct NativeOverlay {
     stops: Vec<Rgba>,
     /// Mean of `stops`: the flat color borders and the no-brush fallback use.
     accent: D2D1_COLOR_F,
-    /// One gradient brush per sector on the current ring, along its own radius.
-    sector_brushes: Vec<Option<ID2D1LinearGradientBrush>>,
+    /// The flat ramp bands per sector on the current ring, inner edge outwards.
+    band_geometry: Vec<Option<Vec<ID2D1PathGeometry>>>,
     origin: Option<POINT>,
 }
 
@@ -496,7 +502,7 @@ impl NativeOverlay {
                     b: 0.24,
                     a: 1.0,
                 },
-                sector_brushes: Vec::new(),
+                band_geometry: Vec::new(),
                 origin: None,
             };
             state.redraw_surface()?;
@@ -521,65 +527,103 @@ impl NativeOverlay {
         let _ = unsafe { TrackMouseEvent(&mut tracking) };
     }
 
-    /// The gradient brush for one sector: the configured stops swept along that
-    /// sector's own radius, inner edge to outer edge.
-    fn create_sector_brush(
+    /// The path for one flat band of a sector: the slice of the wedge between
+    /// `inner` and `outer` along that sector's own radius.
+    fn create_band_geometry(
         &self,
         sector: &Sector,
-        stops: &[Rgba],
-    ) -> Result<ID2D1LinearGradientBrush> {
-        let render_target = self
-            ._render_target
-            .as_ref()
-            .ok_or_else(|| anyhow!("overlay render target unavailable"))?;
-        let collection = unsafe {
-            render_target
-                .CreateGradientStopCollection(
-                    &gradient_stop_array(stops),
-                    D2D1_GAMMA_1_0,
-                    D2D1_EXTEND_MODE_CLAMP,
-                )
-                .context("create sector gradient stops")
-        }?;
+        inner: f32,
+        outer: f32,
+    ) -> Result<ID2D1PathGeometry> {
+        let start_angle = sector.center - sector.width / 2.0;
+        let end_angle = start_angle + sector.width;
         let center = OVERLAY_SIZE_F32 / 2.0;
-        let (sin, cos) = (sector.center.sin() as f32, sector.center.cos() as f32);
-        let mut start = D2D1_ELLIPSE::default().point;
-        start.X = center + cos * super::RING_INNER_RADIUS;
-        start.Y = center + sin * super::RING_INNER_RADIUS;
-        let mut end = D2D1_ELLIPSE::default().point;
-        end.X = center + cos * RING_OUTER_RADIUS;
-        end.Y = center + sin * RING_OUTER_RADIUS;
-        let brush_properties = D2D1_BRUSH_PROPERTIES {
-            opacity: 1.0,
-            ..Default::default()
+        let on = |radius: f32, angle: f64| {
+            let mut point = D2D1_ELLIPSE::default().point;
+            point.X = center + (radius * angle.cos() as f32);
+            point.Y = center + (radius * angle.sin() as f32);
+            point
         };
+        let arc = |point, radius: f32, large: bool, clockwise: bool| D2D1_ARC_SEGMENT {
+            point,
+            size: D2D_SIZE_F {
+                width: radius,
+                height: radius,
+            },
+            rotationAngle: 0.0,
+            sweepDirection: if clockwise {
+                D2D1_SWEEP_DIRECTION_CLOCKWISE
+            } else {
+                D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE
+            },
+            arcSize: if large {
+                D2D1_ARC_SIZE_LARGE
+            } else {
+                D2D1_ARC_SIZE_SMALL
+            },
+        };
+        let outer_start = on(outer, start_angle);
+        let outer_end = on(outer, end_angle);
+        let inner_start = on(inner, start_angle);
+        let inner_end = on(inner, end_angle);
+        let full = sector.width >= std::f64::consts::TAU - f64::EPSILON;
+        let large = sector.width > std::f64::consts::PI;
+
+        let geometry =
+            unsafe { self.factory.CreatePathGeometry() }.context("create band geometry")?;
+        let sink = unsafe { geometry.Open() }.context("open band geometry sink")?;
         unsafe {
-            render_target
-                .CreateLinearGradientBrush(
-                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                        startPoint: start,
-                        endPoint: end,
-                    },
-                    Some(&brush_properties),
-                    &collection,
-                )
-                .context("create sector gradient brush")
+            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+            if full {
+                // A lone sector is the whole ring, so the band is an annulus. Each
+                // circle takes two half arcs, because one arc cannot close a full
+                // turn, and the two are wound opposite ways so the hole is left.
+                let outer_mid = on(outer, start_angle + std::f64::consts::PI);
+                let inner_mid = on(inner, start_angle + std::f64::consts::PI);
+                sink.BeginFigure(outer_start, D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddArc(&arc(outer_mid, outer, false, true));
+                sink.AddArc(&arc(outer_start, outer, false, true));
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                sink.BeginFigure(inner_mid, D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddArc(&arc(inner_start, inner, false, false));
+                sink.AddArc(&arc(inner_mid, inner, false, false));
+                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            } else {
+                // Out along the start edge, round the outside, back down the end
+                // edge, and home along the inside. The closing arc has to run
+                // anticlockwise or it sweeps the long way and swallows the sector.
+                sink.BeginFigure(inner_start, D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddLine(outer_start);
+                sink.AddArc(&arc(outer_end, outer, large, true));
+                sink.AddLine(inner_end);
+                sink.AddArc(&arc(inner_start, inner, large, false));
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
         }
+        unsafe { sink.Close() }.context("close band geometry sink")?;
+        Ok(geometry)
     }
 
-    /// Rebuild the per-sector brushes for the ring on screen. A sector whose
-    /// brush could not be created falls back to the flat accent.
-    fn build_sector_brushes(&mut self) {
-        let stops = self.stops.clone();
-        self.sector_brushes = self
+    /// Rebuild the per-sector bands for the ring on screen. A sector whose bands
+    /// could not be built falls back to the flat accent.
+    fn build_band_geometry(&mut self) {
+        self.band_geometry = self
             .ring
             .sectors
             .iter()
-            .map(|sector| match self.create_sector_brush(sector, &stops) {
-                Ok(brush) => Some(brush),
-                Err(error) => {
-                    tracing::warn!("sector gradient unavailable: {error:#}");
-                    None
+            .map(|sector| {
+                let bands = (0..RAMP_BANDS)
+                    .map(|index| {
+                        let (inner, outer) = band_radii(index);
+                        self.create_band_geometry(sector, inner, outer)
+                    })
+                    .collect::<Result<Vec<_>>>();
+                match bands {
+                    Ok(bands) => Some(bands),
+                    Err(error) => {
+                        tracing::warn!("sector ramp unavailable: {error:#}");
+                        None
+                    }
                 }
             })
             .collect();
@@ -598,7 +642,7 @@ impl NativeOverlay {
     fn relayout_ring(&mut self) {
         self.emphasis.reset(self.ring.sectors.len());
         self.active_sector = None;
-        self.build_sector_brushes();
+        self.build_band_geometry();
         #[cfg(test)]
         {
             *LIT_SECTORS
@@ -720,11 +764,12 @@ impl NativeOverlay {
                         true => None,
                         false => Some(self.create_sector_geometry(sector)?),
                     };
-                    let gradient = match emphasis > 0.0 {
-                        true => self.sector_brushes.get(index).and_then(Option::as_ref),
+                    let lit = emphasis > 0.0;
+                    let bands = match lit {
+                        true => self.band_geometry.get(index).and_then(Option::as_ref),
                         false => None,
                     };
-                    let fill = match gradient {
+                    let fill = match bands {
                         Some(_) => INACTIVE_FILL,
                         None => mix_color(INACTIVE_FILL, self.accent, emphasis),
                     };
@@ -738,20 +783,18 @@ impl NativeOverlay {
                     );
                     fill_brush.SetColor(&fill);
                     stroke_brush.SetColor(&border);
-                    SectorBrush::Solid(fill_brush).fill(
-                        render_target,
-                        full,
-                        geometry.as_ref(),
-                        &outer,
-                    )?;
-                    if let Some(brush) = gradient {
-                        brush.SetOpacity(emphasis * ACTIVE_ALPHA);
-                        SectorBrush::Gradient(brush).fill(
-                            render_target,
-                            full,
-                            geometry.as_ref(),
-                            &outer,
-                        )?;
+                    fill_sector(render_target, fill_brush, full, geometry.as_ref(), &outer)?;
+                    if let Some(bands) = bands {
+                        for (offset, band) in bands.iter().enumerate() {
+                            let color = ramp_color(&self.stops, (offset as f32 + 0.5) / RAMP_BANDS as f32);
+                            fill_brush.SetColor(&D2D1_COLOR_F {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                                a: color.a * emphasis * ACTIVE_ALPHA,
+                            });
+                            fill_sector(render_target, fill_brush, false, Some(band), &outer)?;
+                        }
                     }
                     if full {
                         render_target.DrawEllipse(&outer, stroke_brush, 1.5, None);
@@ -826,7 +869,40 @@ impl NativeOverlay {
 
     fn redraw_and_present(&self) -> Result<()> {
         self.redraw_surface()?;
+        #[cfg(test)]
+        self.record_active_ramp();
         self.present()
+    }
+
+    /// Read back what the lit sector painted, walking its radius from just
+    /// inside the inner edge to just inside the outer one. Sampling the memory
+    /// DC reads the DIB the renderer drew into, so this sees real pixels rather
+    /// than the settings that asked for them.
+    #[cfg(test)]
+    fn record_active_ramp(&self) {
+        use windows::Win32::Graphics::Gdi::GetPixel;
+        let Some(index) = self.active_sector else { return };
+        if self.emphasis.value(index) < 0.9 {
+            return;
+        }
+        let sector = &self.ring.sectors[index];
+        let center = OVERLAY_SIZE_F32 / 2.0;
+        let (sin, cos) = (sector.center.sin() as f32, sector.center.cos() as f32);
+        let span = RING_OUTER_RADIUS - super::RING_INNER_RADIUS;
+        let samples = (1..=5)
+            .map(|step| {
+                // Stay clear of both edges, where the 1.5px borders and the
+                // antialiased wedge tips would tint the reading.
+                let radius = super::RING_INNER_RADIUS + span * (0.15 + 0.14 * step as f32);
+                let x = (center + cos * radius).round() as i32;
+                let y = (center + sin * radius).round() as i32;
+                let color = unsafe { GetPixel(self.memory_dc, x, y) };
+                (radius, color.0)
+            })
+            .collect();
+        *RAMP_SAMPLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = samples;
     }
 
     fn show(&mut self) -> Result<()> {
@@ -884,7 +960,7 @@ impl Drop for NativeOverlay {
         }
         self._stroke_brush.take();
         self._fill_brush.take();
-        self.sector_brushes.clear();
+        self.band_geometry.clear();
         self._render_target.take();
         unsafe { release_dc(self.memory_dc, self.old_bitmap, self.bitmap) };
     }
@@ -892,51 +968,48 @@ impl Drop for NativeOverlay {
 
 /// A sector is painted either with the flat muted fill or, as it lights up,
 /// with the configured gradient over that fill.
-enum SectorBrush<'a> {
-    Solid(&'a ID2D1SolidColorBrush),
-    Gradient(&'a ID2D1LinearGradientBrush),
-}
-
-impl SectorBrush<'_> {
-    fn fill(
-        &self,
-        render_target: &ID2D1DCRenderTarget,
-        full_circle: bool,
-        geometry: Option<&ID2D1PathGeometry>,
-        outer: &D2D1_ELLIPSE,
-    ) -> Result<()> {
-        let brush: &ID2D1Brush = match self {
-            SectorBrush::Solid(brush) => brush,
-            SectorBrush::Gradient(brush) => brush,
-        };
-        unsafe {
-            if full_circle {
-                render_target.FillEllipse(outer, brush);
-            } else if let Some(geometry) = geometry {
-                render_target.FillGeometry(geometry, brush, None::<&ID2D1Brush>);
-            }
+/// Fill one sector: the whole disc when a lone sector is the entire ring, the
+/// wedge path otherwise.
+fn fill_sector(
+    render_target: &ID2D1DCRenderTarget,
+    brush: &ID2D1SolidColorBrush,
+    full_circle: bool,
+    geometry: Option<&ID2D1PathGeometry>,
+    outer: &D2D1_ELLIPSE,
+) -> Result<()> {
+    unsafe {
+        if full_circle {
+            render_target.FillEllipse(outer, brush);
+        } else if let Some(geometry) = geometry {
+            render_target.FillGeometry(geometry, brush, None::<&ID2D1Brush>);
         }
-        Ok(())
     }
+    Ok(())
 }
 
 /// Spread `stops` evenly across the brush's 0.0..=1.0 range.
-fn gradient_stop_array(stops: &[Rgba]) -> Vec<D2D1_GRADIENT_STOP> {
-    let span = (stops.len().saturating_sub(1)).max(1) as f32;
-    stops
-        .iter()
-        .enumerate()
-        .map(|(index, stop)| D2D1_GRADIENT_STOP {
-            position: index as f32 / span,
-            color: D2D1_COLOR_F {
-                r: stop.r,
-                g: stop.g,
-                b: stop.b,
-                a: stop.a,
-            },
-        })
-        .collect()
+/// How many flat bands the active sector is painted in. A linear gradient brush
+/// collapses to a single colour on this render target, so the ramp is built out
+/// of solid slices instead; 48 is enough that the seams do not read as steps.
+const RAMP_BANDS: u32 = 48;
+
+/// Bands are grown slightly past their nominal outer edge so rounding cannot
+/// leave a hairline of background between two of them.
+const BAND_SEAM: f32 = 0.5;
+
+/// The slice of the ring that band `index` covers, from the inner edge outwards.
+fn band_radii(index: u32) -> (f32, f32) {
+    let inner_limit = super::RING_INNER_RADIUS;
+    let step = (RING_OUTER_RADIUS - inner_limit) / RAMP_BANDS as f32;
+    let inner = inner_limit + step * index as f32;
+    let outer = if index + 1 == RAMP_BANDS {
+        RING_OUTER_RADIUS
+    } else {
+        (inner + step + BAND_SEAM).min(RING_OUTER_RADIUS)
+    };
+    (inner, outer)
 }
+
 
 /// One flat color for a gradient: what borders, and the no-brush fallback, use.
 fn mean_color(stops: &[Rgba]) -> D2D1_COLOR_F {
@@ -1208,6 +1281,58 @@ mod tests {
         assert!(
             lit.iter().all(|value| *value == 0.0 || *value > 0.99),
             "the unlit sectors should stay dark, read {lit:?}"
+        );
+    }
+
+    /// Emphasis values prove the fade ran, not that a gradient reached the
+    /// screen. Read the painted pixels across the lit sector: a flat fill gives
+    /// one colour at every radius, which is the bug this pins down.
+    #[test]
+    fn the_lit_sector_paints_a_gradient_rather_than_a_flat_fill() {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        // Black to white, so every step outward has to get brighter.
+        overlay
+            .show(
+                &test_menu(),
+                &Gradient::new(vec![
+                    zest_core::HexColor::new(0x00, 0x00, 0x00),
+                    zest_core::HexColor::new(0xff, 0xff, 0xff),
+                ]),
+            )
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+
+        RAMP_SAMPLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+
+        let samples = RAMP_SAMPLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        assert!(
+            samples.len() >= 3,
+            "expected the lit sector to be sampled, read {samples:?}"
+        );
+        // A memory DC is BGRA, so GetPixel hands back 0x00BBGGRR.
+        let luma = |color: u32| {
+            let (r, g, b) = (color & 0xff, (color >> 8) & 0xff, (color >> 16) & 0xff);
+            0.2126 * r as f32 + 0.7152 * g as f32 + 0.0722 * b as f32
+        };
+        for pair in samples.windows(2) {
+            assert!(
+                luma(pair[1].1) > luma(pair[0].1),
+                "every step outward should be brighter, read {samples:?}"
+            );
+        }
+        let inner = luma(samples[0].1);
+        let outer = luma(samples[samples.len() - 1].1);
+        assert!(
+            outer - inner > 24.0,
+            "the sector should ramp from near its first stop to near its last, read {samples:?}"
         );
     }
 
