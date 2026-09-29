@@ -9,5 +9,6 @@ license.workspace = true
 zest-core.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
-eframe.workspace = true
+gpui.workspace = true
 global-hotkey.workspace = true
+windows.workspace = true

@@ -587,7 +587,7 @@ impl NativeOverlay {
 
     /// Adopt a freshly handed-over ring, with the gradient the app configured.
     fn set_ring(&mut self, pending: PendingOverlay) {
-        self.stops = gradient_stops(&pending.gradient.0);
+        self.stops = gradient_stops(pending.gradient.colors());
         self.accent = mean_color(&self.stops);
         self.ring = pending.ring;
         self.relayout_ring();
@@ -1184,7 +1184,10 @@ mod tests {
         overlay
             .show(
                 &test_menu(),
-                &Gradient(vec!["#00ff00".to_string(), "#0000ff".to_string()]),
+                &Gradient::new(vec![
+                    zest_core::HexColor::new(0x00, 0xff, 0x00),
+                    zest_core::HexColor::new(0x00, 0x00, 0xff),
+                ]),
             )
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));

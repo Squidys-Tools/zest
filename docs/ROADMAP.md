@@ -36,7 +36,7 @@ Exit: press hotkey → circle at cursor; press Esc → gone.
 - [x] Ring 1 filtering (PNG → Convert+Archive; zip → Extract; mixed → Archive).
 - [x] Complete ring 2 fan-out per category and leaf action dispatch; Convert ring via either hotkey path.
 - [x] ~200ms ease-out sector transitions; gradient active sector (1–3 colors).
-- [ ] Center thumbnail / multi-file count badge; Segoe UI Variable; Lucide icons.
+- [ ] Center thumbnail / multi-file count badge; Lucide icons.
 - [ ] Acrylic/mica blur when available; dark-mode default.
 - [x] Pre-created hidden window reveal (no build-on-open).
 
@@ -84,7 +84,7 @@ Exit: mixed selection → zip; zip → Extract restores contents.
 - [ ] Serde conversions between TXT, CSV, JSON, XML, YAML, TOML, Markdown
       where meaningful (structured stays structured).
 - [ ] Markdown→PDF simple: fixed-width text, basic pagination.
-- [ ] egui settings window in parallel (independent): hotkey recorder,
+- [x] gpui settings window in parallel (independent): hotkey recorder,
       quality presets, output location, theme, font dropdown, 1–3 gradient
       pickers, startup checkbox, update cadence, lossy-warning toggle.
 

@@ -10,7 +10,7 @@
 //! WinPie (OSS Rust radial menu) is the architectural reference.
 
 use std::f64::consts::{PI, TAU};
-use zest_core::{Gradient, MenuAction, MenuNode};
+use zest_core::{Gradient, HexColor, MenuAction, MenuNode, DEFAULT_GRADIENT};
 
 /// Ease-out duration for sector hover transitions.
 pub const SECTOR_TRANSITION_MS: u64 = 200;
@@ -41,6 +41,13 @@ impl Rgba {
     }
 }
 
+impl From<HexColor> for Rgba {
+    fn from(color: HexColor) -> Self {
+        let (r, g, b) = color.to_unit_rgb();
+        Self { r, g, b, a: 1.0 }
+    }
+}
+
 /// Parse a `#rrggbb` string — the only form `Gradient` stores.
 pub fn parse_hex_color(hex: &str) -> Option<Rgba> {
     let digits = hex.strip_prefix('#')?;
@@ -61,21 +68,15 @@ pub fn parse_hex_color(hex: &str) -> Option<Rgba> {
 }
 
 /// The gradient the settings window ships with, used when the stored list is
-/// empty or holds nothing parseable.
+/// empty.
 pub fn default_gradient() -> Vec<Rgba> {
-    ["#ff8a3d", "#ff4d6d"]
-        .iter()
-        .map(|hex| parse_hex_color(hex).expect("built-in gradient hex parses"))
-        .collect()
+    DEFAULT_GRADIENT.iter().copied().map(Rgba::from).collect()
 }
 
 /// The settings gradient as brush stops. A single color is doubled because a
 /// gradient brush needs at least two stops.
-pub fn gradient_stops(colors: &[String]) -> Vec<Rgba> {
-    let parsed: Vec<Rgba> = colors
-        .iter()
-        .filter_map(|hex| parse_hex_color(hex))
-        .collect();
+pub fn gradient_stops(colors: &[HexColor]) -> Vec<Rgba> {
+    let parsed: Vec<Rgba> = colors.iter().copied().map(Rgba::from).collect();
     match parsed.len() {
         0 => default_gradient(),
         1 => vec![parsed[0], parsed[0]],
@@ -455,7 +456,10 @@ mod tests {
 
     #[test]
     fn gradient_stops_follow_the_settings_list() {
-        let stops = gradient_stops(&["#000000".to_string(), "#ffffff".to_string()]);
+        let stops = gradient_stops(&[
+            HexColor::new(0x00, 0x00, 0x00),
+            HexColor::new(0xff, 0xff, 0xff),
+        ]);
         assert_eq!(stops.len(), 2);
         assert_eq!(stops[0].r, 0.0);
         assert_eq!(stops[1].r, 1.0);
@@ -463,18 +467,16 @@ mod tests {
 
     #[test]
     fn a_single_gradient_color_becomes_two_stops() {
-        let stops = gradient_stops(&["#123456".to_string()]);
+        let stops = gradient_stops(&[HexColor::new(0x12, 0x34, 0x56)]);
         assert_eq!(stops.len(), 2);
         assert_eq!(stops[0], stops[1]);
     }
 
     #[test]
-    fn an_unusable_gradient_falls_back_to_the_default() {
+    fn an_empty_gradient_falls_back_to_the_default() {
+        // Stops are typed now, so an unparseable color is not representable;
+        // an empty list is the only way to have nothing to draw.
         assert_eq!(gradient_stops(&[]), default_gradient());
-        assert_eq!(
-            gradient_stops(&["nonsense".to_string()]),
-            default_gradient()
-        );
     }
 
     #[test]

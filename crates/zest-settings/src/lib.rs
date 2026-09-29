@@ -1,150 +1,195 @@
-//! Settings window: plain eframe/egui form (PRD §How It Looks and Feels).
-//! Hotkey recorder, quality presets, output location, theme, font dropdown,
-//! 1–3 gradient color pickers, startup checkbox, update cadence,
-//! lossy-warning toggle. (Reactor migration is post-MVP.)
+//! Settings window: a gpui form (PRD §How It Looks and Feels).
+//! Hotkey press recorder, JPEG quality, video preset, audio bitrate, theme,
+//! font dropdown, 1–3 gradient colors with a live sector preview, startup
+//! checkbox, update cadence, lossy-warning toggle.
+//!
+//! Runs on its own thread; the app loop and the Direct2D overlay are untouched.
 
-use eframe::egui;
-use global_hotkey::hotkey::HotKey;
-use zest_core::{Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY};
+mod gradient;
+mod hotkey;
+mod theme;
+mod view;
+mod widgets;
 
+use gpui::{div, px, prelude::*};
+use zest_core::{
+    Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY, SYSTEM_UI_FONT,
+};
+
+use view::{Menu, SettingsView};
+
+/// Open the settings window with no notice.
 pub fn run(settings: Settings) -> anyhow::Result<()> {
-    run_with_notice(settings, None)
+    view::run_window(settings, None)
 }
 
 pub fn run_with_notice(settings: Settings, startup_notice: Option<String>) -> anyhow::Result<()> {
-    let app = SettingsApp {
-        settings,
-        startup_notice,
-    };
-    eframe::run_native(
-        "Zest Settings",
-        eframe::NativeOptions::default(),
-        Box::new(|_| Ok(Box::new(app))),
-    )
-    .map_err(|e| anyhow::anyhow!("settings window: {e:?}"))?;
-    Ok(())
+    view::run_window(settings, startup_notice)
 }
 
-struct SettingsApp {
-    settings: Settings,
-    startup_notice: Option<String>,
-}
+// ── the form ────────────────────────────────────────────────────────────
 
-impl eframe::App for SettingsApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let hotkey_error = validate_hotkey(&self.settings.hotkey).err();
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("Zest Settings");
-            ui.separator();
-            if let Some(notice) = &self.startup_notice {
-                ui.colored_label(egui::Color32::YELLOW, notice);
-            }
+impl SettingsView {
+    pub fn compose(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let mut page = div().flex().flex_col().gap(px(20.0));
+        page = page.child(self.header());
+        if let Some(notice) = self.notice() {
+            page = page.child(notice);
+        }
+        page = page
+            .child(self.hotkey_section(cx))
+            .child(self.conversion_section(cx))
+            .child(self.appearance_section(cx))
+            .child(self.updates_section(cx))
+            .child(self.footer(cx));
 
-            ui.horizontal(|ui| {
-                ui.label("Hotkey");
-                ui.text_edit_singleline(&mut self.settings.hotkey);
-            });
-            ui.label("Press-record lands in MVP (currently type e.g. Shift+F).");
-            if let Some(error) = hotkey_error {
-                ui.colored_label(egui::Color32::RED, error);
-            }
+        let palette = self.palette.clone();
+        let font = self.interface_font();
+        div()
+            .id("settings-scroll")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(palette.window)
+            .text_color(palette.text)
+            .font_family(font)
+            .child(
+                div()
+                    .mx_auto()
+                    .w(px(660.0))
+                    .px(px(28.0))
+                    .py(px(24.0))
+                    .child(page),
+            )
+            .into_any_element()
+    }
 
-            ui.horizontal(|ui| {
-                ui.label("JPEG quality");
-                ui.add(egui::Slider::new(&mut self.settings.jpeg_quality, 1..=100));
-            });
+    fn hotkey_section(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let record = self.record_button(cx);
+        let readout = self.hotkey_readout();
+        let capture = self.field(
+            "Presses are recorded, not typed",
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .child(record)
+                .child(readout)
+                .into_any_element(),
+        );
+        self.section("Menu shortcut", vec![capture])
+    }
 
-            egui::ComboBox::from_label("Video preset")
-                .selected_text(format!("{:?}", self.settings.video_preset))
-                .show_ui(ui, |ui| {
-                    for p in [
-                        VideoPreset::Low,
-                        VideoPreset::Medium,
-                        VideoPreset::High,
-                        VideoPreset::Lossless,
-                    ] {
-                        ui.selectable_value(&mut self.settings.video_preset, p, format!("{p:?}"));
-                    }
-                });
+    fn conversion_section(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let quality = self.settings.jpeg_quality;
+        let slider = self.slider(
+            cx,
+            "jpeg-quality",
+            f32::from(quality - 1) / 99.0,
+            quality.to_string(),
+            |fraction, this| {
+                this.settings.jpeg_quality = (1 + (fraction * 99.0).round() as u16) as u8;
+            },
+        );
+        let preset = self.dropdown(
+            cx,
+            "video-preset",
+            Menu::VideoPreset,
+            vec![
+                ("Low".to_string(), VideoPreset::Low),
+                ("Medium".to_string(), VideoPreset::Medium),
+                ("High".to_string(), VideoPreset::High),
+                ("Lossless".to_string(), VideoPreset::Lossless),
+            ],
+            self.settings.video_preset,
+            |value, this| this.settings.video_preset = value,
+        );
+        let bitrate = self.stepper(cx, self.settings.audio_bitrate_kbps);
+        let lossy = self.checkbox(
+            cx,
+            "Warn before lossy-to-lossy conversion",
+            self.settings.warn_lossy_to_lossy,
+            |this| this.settings.warn_lossy_to_lossy = !this.settings.warn_lossy_to_lossy,
+        );
+        let rows = vec![
+            self.field("JPEG quality (1–100)", slider),
+            self.field("Video preset", preset),
+            self.field("Audio bitrate", bitrate),
+            lossy,
+        ];
+        self.section("Conversion", rows)
+    }
 
-            ui.horizontal(|ui| {
-                ui.label("Audio bitrate (kbps)");
-                ui.add(egui::DragValue::new(&mut self.settings.audio_bitrate_kbps));
-            });
+    fn appearance_section(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let theme = self.dropdown(
+            cx,
+            "theme",
+            Menu::Theme,
+            vec![
+                ("System".to_string(), Theme::System),
+                ("Light".to_string(), Theme::Light),
+                ("Dark".to_string(), Theme::Dark),
+            ],
+            self.settings.theme,
+            // The dropdown re-renders after `on_select`, so rebuilding the
+            // palette here is enough.
+            |value, this| this.apply_theme(value),
+        );
+        let font = self.font_control(cx);
+        let gradient = self.gradient_editor(cx);
+        let rows = vec![
+            self.field("Theme", theme),
+            self.field("Interface font", font),
+            gradient,
+        ];
+        self.section("Appearance", rows)
+    }
 
-            egui::ComboBox::from_label("Theme")
-                .selected_text(format!("{:?}", self.settings.theme))
-                .show_ui(ui, |ui| {
-                    for t in [Theme::System, Theme::Light, Theme::Dark] {
-                        ui.selectable_value(&mut self.settings.theme, t, format!("{t:?}"));
-                    }
-                });
+    fn updates_section(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let startup = self.checkbox(
+            cx,
+            "Launch at startup",
+            self.settings.launch_at_startup,
+            |this| this.settings.launch_at_startup = !this.settings.launch_at_startup,
+        );
+        let frequency = self.dropdown(
+            cx,
+            "update-frequency",
+            Menu::UpdateFrequency,
+            vec![
+                ("Daily".to_string(), UpdateFrequency::Daily),
+                ("Weekly".to_string(), UpdateFrequency::Weekly),
+                ("Never".to_string(), UpdateFrequency::Never),
+            ],
+            self.settings.update_frequency,
+            |value, this| this.settings.update_frequency = value,
+        );
+        self.section("Startup & updates", vec![startup, frequency])
+    }
 
-            ui.horizontal(|ui| {
-                ui.label("Font");
-                ui.text_edit_singleline(&mut self.settings.font_family);
-            });
-
-            ui.label(format!(
-                "Gradient ({} of max 3)",
-                self.settings.gradient.0.len()
-            ));
-            let mut remove = None;
-            for (i, color) in self.settings.gradient.0.iter_mut().enumerate() {
-                ui.horizontal(|ui| {
-                    ui.label(format!("Color {}", i + 1));
-                    ui.text_edit_singleline(color);
-                    if ui.button("−").clicked() {
-                        remove = Some(i);
-                    }
-                });
-            }
-            if let Some(i) = remove {
-                if self.settings.gradient.0.len() > 1 {
-                    self.settings.gradient.0.remove(i);
-                }
-            }
-            if self.settings.gradient.0.len() < 3 && ui.button("Add color").clicked() {
-                self.settings.gradient.0.push("#ffffff".to_string());
-            }
-
-            ui.checkbox(&mut self.settings.launch_at_startup, "Launch at startup");
-            egui::ComboBox::from_label("Update frequency")
-                .selected_text(format!("{:?}", self.settings.update_frequency))
-                .show_ui(ui, |ui| {
-                    for f in [
-                        UpdateFrequency::Daily,
-                        UpdateFrequency::Weekly,
-                        UpdateFrequency::Never,
-                    ] {
-                        ui.selectable_value(
-                            &mut self.settings.update_frequency,
-                            f,
-                            format!("{f:?}"),
-                        );
-                    }
-                });
-            ui.checkbox(
-                &mut self.settings.warn_lossy_to_lossy,
-                "Warn before lossy-to-lossy conversion",
-            );
-
-            ui.separator();
-            if ui
-                .add_enabled(hotkey_error.is_none(), egui::Button::new("Save"))
-                .clicked()
-            {
-                if let Err(e) = self.settings.save() {
-                    tracing::warn!("save failed: {e:#}");
-                } else {
-                    self.startup_notice = None;
-                }
-            }
-        });
+    fn footer(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let invalid = crate::validate_hotkey(&self.settings.hotkey).err();
+        let save = self.save_button(invalid.is_some(), cx);
+        let status = match invalid {
+            Some(message) => self.hint(message, true),
+            None => div().into_any_element(),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(8.0))
+            .child(status)
+            .child(save)
+            .into_any_element()
     }
 }
 
+fn _system_font() -> &'static str {
+    SYSTEM_UI_FONT
+}
+
 fn validate_hotkey(value: &str) -> Result<(), &'static str> {
+    use global_hotkey::hotkey::HotKey;
     let hotkey = value
         .parse::<HotKey>()
         .map_err(|_| "Enter a valid shortcut, such as Shift+F.")?;
@@ -170,5 +215,15 @@ mod tests {
     fn rejects_invalid_and_reserved_hotkeys() {
         assert!(validate_hotkey("Shift+").is_err());
         assert!(validate_hotkey(DEFAULT_CONVERT_HOTKEY).is_err());
+    }
+
+    #[test]
+    fn accepts_what_the_recorder_can_produce() {
+        for recorded in ["Ctrl+Shift+K", "Alt+SPACE", "Ctrl+Alt+SUPER+SHIFT+A", "Ctrl+F7"] {
+            assert!(
+                validate_hotkey(recorded).is_ok(),
+                "{recorded} should be accepted"
+            );
+        }
     }
 }
