@@ -15,7 +15,7 @@ use gpui::{
 use zest_core::{HexColor, MAX_GRADIENT_COLORS};
 
 use crate::view::{Drag, SettingsView};
-use crate::widgets::{fraction_in, gradient_segments, to_color, Axis};
+use crate::ui::{Axis, fraction_in, gradient_segments, to_color};
 
 /// Size of the two picker surfaces, and the geometry the marker maths uses.
 const PICKER_WIDTH: f32 = 240.0;
