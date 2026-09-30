@@ -8,6 +8,7 @@
 mod gradient;
 mod hotkey;
 mod theme;
+mod ui;
 mod view;
 mod widgets;
 
@@ -16,7 +17,7 @@ use zest_core::{
     Settings, Theme, UpdateFrequency, VideoPreset, DEFAULT_CONVERT_HOTKEY, SYSTEM_UI_FONT,
 };
 
-use view::{Menu, SettingsView};
+use view::{Drag, Menu, SettingsView};
 
 /// Open the settings window with no notice.
 pub fn run(settings: Settings) -> anyhow::Result<()> {
@@ -84,6 +85,7 @@ impl SettingsView {
         let slider = self.slider(
             cx,
             "jpeg-quality",
+            Drag::JpegQuality,
             f32::from(quality - 1) / 99.0,
             quality.to_string(),
             |fraction, this| {
