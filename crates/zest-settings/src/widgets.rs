@@ -182,7 +182,7 @@ impl SettingsView {
             self.settings.font_family.clone()
         };
 
-        let trigger = ui::font_trigger(&self.palette, current, open, self.font_missing)
+        let trigger = ui::menu_trigger(&self.palette, "font", current, open, self.font_missing)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.toggle_menu(Menu::Font, cx)
             }))
@@ -239,7 +239,7 @@ impl SettingsView {
     // ── stepper ──────────────────────────────────────────────────────────
 
     pub fn stepper(&mut self, cx: &mut Context<Self>, value: u32) -> AnyElement {
-        let parts = ui::stepper(&self.palette, value, "kbps");
+        let parts = ui::stepper(&self.palette, "bitrate", value, "kbps");
         let step = |this: &mut Self, next: u32, cx: &mut Context<Self>| {
             this.settings.audio_bitrate_kbps = next.clamp(AUDIO_MIN, AUDIO_MAX);
             cx.notify();

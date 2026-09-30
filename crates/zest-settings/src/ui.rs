@@ -1,8 +1,8 @@
 //! The settings window's presentation layer: paint, with no state and no events.
 //!
 //! Every function here is a pure `(&Palette, data) -> element` mapping. Nothing
-//! in this module knows that `SettingsView` exists, which is what makes the
-//! look of a control testable and movable without dragging its state along.
+//! in this module knows that `SettingsView` exists, so a control's appearance
+//! can be read, changed, and moved without dragging its state along.
 //!
 //! Controls that need a click return [`Stateful`] rather than `AnyElement`:
 //! gpui 0.2 does not implement `InteractiveElement` for `AnyElement`, so the
@@ -221,10 +221,24 @@ pub fn checkbox(palette: &Palette, label: &str, value: bool) -> Stateful<Div> {
 
 // ── slider ───────────────────────────────────────────────────────────────
 
-/// The draggable track: rail, fill, knob. It records its own painted bounds so
-/// a drag can be resolved against the track rather than the window, and it
-/// carries no listeners — the caller attaches them to the returned element.
-pub fn slider_track(
+/// A slider: its draggable track and the scale beneath it, as two parts.
+///
+/// The track records its own painted bounds so a drag can be resolved against
+/// the track rather than the window, and it carries no listeners — the caller
+/// attaches them to the returned element.
+pub fn slider(
+    palette: &Palette,
+    id: &str,
+    fraction: f32,
+    readout: String,
+    area: Rc<RefCell<Option<Bounds<Pixels>>>>,
+) -> (Stateful<Div>, Div) {
+    let track = slider_track(palette, id, fraction, area);
+    let scale = slider_scale(palette, readout);
+    (track, scale)
+}
+
+fn slider_track(
     palette: &Palette,
     id: &str,
     fraction: f32,
@@ -292,7 +306,7 @@ pub fn slider_track(
 }
 
 /// The `1 … readout … 100` scale under a slider.
-pub fn slider_scale(palette: &Palette, readout: String) -> Div {
+fn slider_scale(palette: &Palette, readout: String) -> Div {
     div()
         .flex()
         .justify_between()
@@ -303,37 +317,24 @@ pub fn slider_scale(palette: &Palette, readout: String) -> Div {
         .child("100")
 }
 
-/// A slider: its track and its scale, stacked.
-pub fn slider(
-    palette: &Palette,
-    id: &str,
-    fraction: f32,
-    readout: String,
-    area: Rc<RefCell<Option<Bounds<Pixels>>>>,
-) -> (Stateful<Div>, Div) {
-    let track = slider_track(palette, id, fraction, area);
-    let scale = slider_scale(palette, readout);
-    (track, scale)
-}
-
 // ── stepper ──────────────────────────────────────────────────────────────
 
 /// A `− value +` control, returned as its three parts so each button can carry
 /// its own handler. `unit` is appended to the value, e.g. `"kbps"`.
 ///
-/// The element ids are fixed rather than derived from `unit`: they are
-/// internal to this window, and keeping them stable means the split cannot
-/// change what gpui tracks for hover.
+/// `id` names the control and seeds all three element ids, the way `index` does
+/// for [`option_row`]. Fixed ids would collide the moment a second stepper
+/// shared this window, and gpui tracks hover by element id.
 pub struct Stepper {
     pub decrease: Stateful<Div>,
     pub value: Stateful<Div>,
     pub increase: Stateful<Div>,
 }
 
-pub fn stepper(palette: &Palette, value: u32, unit: &str) -> Stepper {
+pub fn stepper(palette: &Palette, id: &str, value: u32, unit: &str) -> Stepper {
     Stepper {
         decrease: div()
-            .id("step-down")
+            .id(SharedString::from(format!("{id}-down")))
             .size(px(30.0))
             .flex()
             .items_center()
@@ -344,7 +345,7 @@ pub fn stepper(palette: &Palette, value: u32, unit: &str) -> Stepper {
             .bg(palette.field)
             .child("−"),
         value: div()
-            .id("audio-value")
+            .id(SharedString::from(format!("{id}-value")))
             .min_w(px(92.0))
             .h(px(30.0))
             .px(px(10.0))
@@ -358,7 +359,7 @@ pub fn stepper(palette: &Palette, value: u32, unit: &str) -> Stepper {
             .text_sm()
             .child(format!("{value} {unit}")),
         increase: div()
-            .id("step-up")
+            .id(SharedString::from(format!("{id}-up")))
             .size(px(30.0))
             .flex()
             .items_center()
@@ -472,45 +473,6 @@ pub fn font_body(trigger: AnyElement, list: Vec<AnyElement>) -> Div {
 }
 
 // ── font ─────────────────────────────────────────────────────────────────
-
-/// The family trigger. `missing` paints the danger border the caller already
-/// computed, so the module has no opinion about where that came from.
-pub fn font_trigger(
-    palette: &Palette,
-    label: String,
-    open: bool,
-    missing: bool,
-) -> Stateful<Div> {
-    let border = if open {
-        palette.accent
-    } else if missing {
-        palette.danger
-    } else {
-        palette.border_strong
-    };
-    div()
-        .id("font-trigger")
-        .h(px(32.0))
-        .w_full()
-        .px(px(12.0))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(16.0))
-        .rounded_md()
-        .border_1()
-        .border_color(border)
-        .bg(palette.field)
-        .text_sm()
-        .cursor_pointer()
-        .hover(|style| style.bg(palette.surface_raised))
-        .child(label)
-        .child(
-            div()
-                .text_color(palette.text_muted)
-                .child(if open { "▲" } else { "▼" }),
-        )
-}
 
 pub fn font_missing_note(palette: &Palette, family: &str) -> AnyElement {
     div()
