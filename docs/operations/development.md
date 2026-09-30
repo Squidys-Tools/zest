@@ -32,6 +32,11 @@ directory, so a MinGW installed anywhere else is never consulted. The
 `libwindows.0.5x.0.a` rather than per-DLL libraries, so they do not help
 either.
 
+Note that the GNU build also needs `--target x86_64-pc-windows-gnu` passed
+explicitly. Nothing in the repo sets a default target, so a bare `cargo build`
+happily builds the MSVC one and reports success, which makes it look as though
+the wrapper worked when it did nothing at all.
+
 `-lktmw32` reaches the link line because `gpui` enables the `windows` feature
 `Win32_Storage_FileSystem`, and those bindings carry `#[link("ktmw32.dll")]` on
 the kernel transaction manager calls. Zest never calls into KTM, so the import
@@ -46,10 +51,31 @@ Setting `RUSTFLAGS` at all makes cargo ignore `[build] rustflags` in
 `.cargo/config.toml`, so the linker path cannot live in a config file for this
 reason as well as the machine-specific path.
 
-One more trap: cargo resolves `rustc` from `PATH`, so a second, non-rustup Rust
-install produces a wall of `found crate X compiled by an incompatible version of
-rustc` (E0514). The script pins `RUSTC` to cargo's own sibling. If you hit that
-by hand, `cargo clean` clears the mixed artifacts.
+#### The toolchain has to be picked, not inherited
+
+Two more traps sit between you and a link, and the script handles both.
+
+`rust-toolchain.toml` pins an MSVC toolchain, and an MSVC-host toolchain cannot
+build a GNU target at all — no GNU std, no bundled gcc. Left alone you get
+`E0463: can't find crate for core`, once per dependency. Install the GNU one:
+
+```powershell
+rustup toolchain install stable-x86_64-pc-windows-gnu
+```
+
+cargo also resolves `rustc` from `PATH`, so a second, non-rustup Rust install
+sitting ahead of the rustup shims wins that lookup even though
+`rust-toolchain.toml` says otherwise. Mixing toolchains produces a wall of
+`found crate X compiled by an incompatible version of rustc` (E0514); if you hit
+that by hand, `cargo clean` clears the mixed artifacts.
+
+Finally, the gcc has to be the toolchain's own bundled driver, at
+`<sysroot>\lib\rustlib\x86_64-pc-windows-gnu\bin\self-contained\x86_64-w64-mingw32-gcc.exe`.
+It was built against that toolchain's `libgcc`, so pointing cargo at a
+separately installed MinGW instead fails the link with
+`cannot find -lgcc_eh`. That is also why installing a fuller MinGW does not fix
+the original `libktmw32` error: the bundled driver only ever searches its own
+`self-contained` directory.
 
 ## Commands
 

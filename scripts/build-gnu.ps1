@@ -29,6 +29,13 @@
   it on the linker's search path with `-L native=`. Failing that it mints a
   two-line stub, which is equally safe for the same reason.
 
+  It also pins the whole toolchain. cargo takes rustc from PATH, and a machine
+  with a second, non-rustup Rust install ahead of the shims otherwise mixes two
+  toolchains. Worse, that install may be an MSVC one with no GNU std at all. And
+  the gcc must be the toolchain's own bundled driver: it was built against that
+  toolchain's libgcc, so a separately installed MinGW's driver fails the link
+  with "cannot find -lgcc_eh".
+
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\build-gnu.ps1
 
@@ -55,6 +62,11 @@ function Log($msg) { Write-Output "[gnu] $msg" }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 
+# Passed to cargo explicitly, never left to the host default. Nothing in the
+# repo overrides the default target, so omitting this would build MSVC and
+# leave every line of linker setup below doing nothing.
+$target = "x86_64-pc-windows-gnu"
+
 # The library whose absence is the whole problem. Everything else the linker
 # wants, rustup's self-contained directory already has.
 $Missing = "libktmw32.a"
@@ -64,13 +76,9 @@ function Test-LibDir([string]$dir) {
     return Test-Path (Join-Path $dir $Missing)
 }
 
-function Resolve-Gcc {
-    # Ask PATH, then the usual MinGW install layouts.
-    $onPath = (Get-Command "x86_64-w64-mingw32-gcc" -ErrorAction SilentlyContinue)
-    if ($onPath) { return (Split-Path (Split-Path $onPath.Source -Parent) -Parent) }
-    $gcc = (Get-Command "gcc" -ErrorAction SilentlyContinue)
-    if ($gcc) { return (Split-Path (Split-Path $gcc.Source -Parent) -Parent) }
-    return $null
+function Resolve-GccRoot([string]$gccExe) {
+    if (-not $gccExe) { return $null }
+    return (Split-Path (Split-Path $gccExe -Parent) -Parent)
 }
 
 # Where a complete MinGW keeps its import libraries, relative to the gcc root.
@@ -83,7 +91,7 @@ function Find-MingwLibDir {
     $candidates = @()
     if ($env:ZEST_MINGW_LIB) { $candidates += $env:ZEST_MINGW_LIB }
 
-    $gccRoot = Resolve-Gcc
+    $gccRoot = Resolve-GccRoot $script:gccExe
     if ($gccRoot) {
         foreach ($sub in $libSubdirs) { $candidates += (Join-Path $gccRoot $sub) }
     }
@@ -127,6 +135,95 @@ function New-Ktmw32Stub {
     return $stubDir
 }
 
+# --------------------------------------------------------------- toolchain ---
+
+# The toolchain has to be one that can actually link $target, and the default
+# one usually cannot. `rust-toolchain.toml` pins an MSVC toolchain, and an
+# MSVC-host toolchain has no gnu std, no bundled gcc, and no self-contained
+# import libraries — the build dies with E0463 or "linker not found" before any
+# of the setup below matters.
+#
+# cargo takes rustc from PATH, so a second, non-rustup install ahead of the
+# shims makes it worse: mixing toolchains leaves a wall of E0514s, and a
+# standalone MSVC install has no GNU std at all.
+#
+# So resolve the toolchain through rustup and pick one whose host is $target.
+$rustup = (Get-Command "rustup" -ErrorAction SilentlyContinue)
+if (-not $rustup) {
+    throw "[gnu] rustup is not on PATH. This script needs it to find a $target toolchain; a bare MSVC cargo cannot cross-compile to it."
+}
+
+function Get-Toolchain([string]$name, [string]$tool) {
+    # `rustup which --toolchain` exits non-zero for a toolchain that is not
+    # installed, so an unknown name simply yields $null.
+    $out = (& $rustup.Source which --toolchain $name $tool 2>$null)
+    if ($LASTEXITCODE -ne 0) { return $null }
+    $path = @($out)[0]
+    if (-not $path) { return $null }
+    return $path.Trim()
+}
+
+# Prefer the toolchain rust-toolchain.toml asks for, but only if it can link the
+# target; otherwise take the first installed one that can.
+$pinned = @(& $rustup.Source show active-toolchain 2>$null)[0]
+# That line reads "1.92.0-... (overridden by '...rust-toolchain.toml')"; keep the
+# toolchain name only.
+$pinned = if ($pinned) { ($pinned.Trim() -split '\s+')[0] } else { $null }
+$installed = @(& $rustup.Source toolchain list 2>$null | ForEach-Object { ($_ -split '\s+')[0] })
+
+$ordered = @()
+if ($pinned) { $ordered += $pinned }
+foreach ($tc in $installed) { if ($tc -ne $pinned) { $ordered += $tc } }
+
+$rustcExe = $null
+$cargoExe = $null
+$chosen = $null
+foreach ($tc in $ordered) {
+    $tcRustc = Get-Toolchain $tc "rustc"
+    if (-not $tcRustc) { continue }
+    $hostTriple = ((& $tcRustc -vV 2>$null | Select-String "^host:") -replace "^host:\s*", "")
+    if ($hostTriple -ne $target) { continue }
+    $tcCargo = Get-Toolchain $tc "cargo"
+    if (-not $tcCargo) { continue }
+    $rustcExe = $tcRustc
+    $cargoExe = $tcCargo
+    $chosen = $tc
+    break
+}
+
+if (-not $chosen) {
+    throw "[gnu] no installed rustup toolchain targets $target. Install one: rustup toolchain install stable-x86_64-pc-windows-gnu"
+}
+
+if ($pinned -and $chosen -ne $pinned) {
+    Log "rust-toolchain.toml pins '$pinned', which cannot build $target; using '$chosen' instead"
+}
+$env:RUSTC = $rustcExe
+Log "toolchain = $chosen"
+
+$rustdocExe = Get-Toolchain $chosen "rustdoc"
+if ($rustdocExe) { $env:RUSTDOC = $rustdocExe }
+
+# That toolchain carries its own gcc, kept beside the import libraries and crt
+# objects it was built against:
+#
+#   <toolchain>\lib\rustlib\<target>\bin\self-contained\x86_64-w64-mingw32-gcc.exe
+#   <toolchain>\lib\rustlib\<target>\lib\self-contained
+#
+# Point cargo at that driver rather than any gcc on PATH. A separately installed
+# MinGW is a different build with a different libgcc, and pairing its driver with
+# the toolchain's own libraries fails at the link with "cannot find -lgcc_eh".
+$sysroot = (& $rustcExe --print sysroot 2>$null)
+$bundledGcc = Join-Path $sysroot "lib\rustlib\$target\bin\self-contained\x86_64-w64-mingw32-gcc.exe"
+if (-not (Test-Path $bundledGcc)) {
+    throw "[gnu] toolchain '$chosen' has no bundled gcc at $bundledGcc. rustup toolchain install $chosen --component rust-mingw"
+}
+$env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = $bundledGcc
+Log "linker = $bundledGcc"
+
+# Only used to guess where a complete MinGW might live.
+$script:gccExe = (Get-Command "x86_64-w64-mingw32-gcc" -ErrorAction SilentlyContinue).Source
+
 # --------------------------------------------------------------- resolve ---
 
 if ($MingwLibDir -and -not (Test-LibDir $MingwLibDir)) {
@@ -161,23 +258,6 @@ foreach ($extra in $ExtraLibDir) {
 
 # ------------------------------------------------------------- environment ---
 
-# cargo resolves rustc from PATH, which on a machine with a second, non-rustup
-# Rust install can be a different toolchain. Mixed versions fail with a wall of
-# "found crate X compiled by an incompatible version of rustc" (E0514), so pin
-# both to whatever cargo is about to use.
-$cargo = (Get-Command cargo -ErrorAction SilentlyContinue)
-if (-not $cargo) { throw "[gnu] cargo is not on PATH" }
-$cargoBin = Split-Path $cargo.Source -Parent
-$rustcExe = Join-Path $cargoBin "rustc.exe"
-if (Test-Path $rustcExe) {
-    $env:RUSTC = $rustcExe
-    $rustdocExe = Join-Path $cargoBin "rustdoc.exe"
-    if (Test-Path $rustdocExe) { $env:RUSTDOC = $rustdocExe }
-}
-else {
-    Log "cargo has no sibling rustc.exe; relying on rustup to resolve the toolchain"
-}
-
 # Append rather than replace, so a caller who set RUSTFLAGS for their own reasons
 # keeps them. Note that setting RUSTFLAGS at all disables cargo's default
 # behaviour of reading `[build] rustflags` from .cargo/config.toml, which is why
@@ -193,9 +273,9 @@ Push-Location $repoRoot
 try {
     # Splat an array rather than passing a possibly-empty string, which cargo
     # rejects as an unexpected positional argument.
-    $cargoArgs = @("build")
+    $cargoArgs = @("build", "--target", $target)
     if ($Release) { $cargoArgs += "--release" }
-    & $cargo.Source @cargoArgs
+    & $cargoExe @cargoArgs
     $code = $LASTEXITCODE
 }
 finally {
@@ -204,7 +284,9 @@ finally {
 
 if ($code -ne 0) { exit $code }
 
-$built = Join-Path $repoRoot "target\debug\zest.exe"
-if ($Release) { $built = Join-Path $repoRoot "target\release\zest.exe" }
+# cargo nests cross-target output under target\<triple>\<profile>.
+$profile = if ($Release) { "release" } else { "debug" }
+$built = Join-Path $repoRoot "target\$target\$profile\zest.exe"
 if (Test-Path $built) { Log "built $built" }
+else { throw "[gnu] cargo reported success but $built is missing" }
 exit 0
