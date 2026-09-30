@@ -3,10 +3,12 @@
 Lightweight Windows tray utility: select files in Explorer, press a hotkey, get a
 radial menu with only the conversions / archive actions that make sense.
 
-> Scaffold status: app architecture, the Phase 0 selection resolver, the tray
-> actions, the global hotkey listener, and the Phase 1 static Direct2D overlay
-> are in place. Conversion engines remain stubbed with explicit `TODO(MVP)`
-> markers in dependency order. See `docs/ARCHITECTURE.md`.
+> Status: the selection resolver (Phase 0), the tray, hotkeys, and the whole
+> Phase 2 ring — sectors, ring-1 filtering, ring-2 fan-out, leaf dispatch,
+> pre-created window — are in place, as is the image conversion engine and a
+> gpui settings window. Media, text, and archive conversion are still stubbed,
+> with the remaining work in dependency order under `docs/ROADMAP.md`.
+> See `docs/ARCHITECTURE.md`.
 
 ## Layout
 
@@ -17,7 +19,7 @@ crates/
   zest-convert/    image / media(ffmpeg) / text(serde) / archive(zip+tar+flate2)
   zest-shell/      tray, hotkey, toast, startup, auto-update
   zest-overlay/    radial menu model + Direct2D layered-window renderer
-  zest-settings/   egui settings window
+  zest-settings/   gpui settings window
   zest-app/        tokio binary wiring everything together
 docs/ARCHITECTURE.md
 wix/               MSI packaging placeholder (WiX v4/v5)

@@ -19,11 +19,17 @@
 | Task | Command |
 | --- | --- |
 | Check everything | `cargo check --workspace` |
-| Unit tests (pure logic) | `cargo test -p zest-core -p zest-overlay -p zest-selection` |
-| Run the scaffold | `cargo run -p zest-app -- --check-selection` |
+| Unit tests (pure logic) | `cargo test -p zest-core -p zest-selection` |
+| Overlay Windows tests | `cargo test -p zest-overlay` |
+| Check the selection resolver | `cargo run -p zest-app -- --check-selection` |
 | Open settings window | `cargo run -p zest-app -- --settings` |
 | Lint | `cargo clippy --workspace` |
 | Format | `cargo fmt --all` |
+
+The `zest-overlay` tests create real top-level windows and drive them with the
+real cursor, so they need an interactive desktop. Where there is none they print
+`skipping: …` and pass without asserting; the pixel checks light a sector
+through a test-only window message and do not need a mouse.
 
 `--check-selection` prints the resolved selection, both rings with the action
 behind every leaf, and the `Shift+C` ring, falling back to a mock PNG when COM

@@ -41,15 +41,46 @@ at `ANIMATION_FRAME_MS`, each tick advances the fades and repaints, and the
 timer is killed once every fade settles — so an idle ring costs nothing.
 
 The active sector is the muted fill with the configured gradient painted over
-it at `emphasis` opacity, which cross-fades in both directions from one brush
-per sector. Those brushes are built from the `Gradient` in settings: stops are
-parsed to straight-alpha colors, spread evenly over the brush, and swept along
-that sector's own radius from the inner edge to the outer edge. A sector whose
-brush could not be created falls back to the flat mean color, so a gradient
-failure costs the sweep and not the hover.
+it at `emphasis` opacity, which cross-fades in both directions in one blend.
+The gradient comes from the `Gradient` in settings: stops are parsed to
+straight-alpha colors and spread evenly across the sector's own radius, from
+the inner edge to the outer edge. A gradient that could not be built falls back
+to the flat mean color, so a gradient failure costs the ramp and not the hover.
 
 Settings are re-read on every show, so a gradient picked in the settings window
 shows up on the next hotkey without a restart.
+
+## Why the gradient is painted as bands
+
+Not because the render target cannot do it. `ID2D1DCRenderTarget` was the
+first suspect and it is exonerated: a bare black-to-white ramp fills a rectangle
+with one flat colour, at 0.737 of full brightness, on a DC render target *and*
+on a WIC-backed `ID2D1BitmapRenderTarget`, with the axis set both in the brush
+properties and again with `SetStartPoint`/`SetEndPoint`. A solid brush on
+either target reads back exactly, so the readback and the target are both fine.
+The flat colour tracks the stop list — red to green paints a flat yellow — so
+the brush has the stops and evaluates its axis at a single point.
+
+The `windows` crate is the reason. Three separate defects, in 0.61 and in
+0.62.2 alike:
+
+- `D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES` is declared as the two points alone,
+  16 bytes, where the platform reads 28. The trailing interpolation, extend,
+  and alpha modes come off the stack.
+- `ID2D1LinearGradientBrush`'s method table omits `ID2D1GradientBrush`, so its
+  four methods sit one slot early. `GetStartPoint` takes the process down.
+- `CreateLinearGradientBrush`'s binding drops the `riid` parameter, shifting
+  every argument after the stop collection by one.
+
+So the ramp is painted as `RAMP_BANDS` concentric solid wedges filled with
+`ramp_color` at each band's midpoint, overlapping by `BAND_SEAM` so rounding
+cannot leave hairlines. They are a workaround for the bindings, not for the
+target. `the_windows_binding_under_reads_linear_gradient_properties` pins the
+16-versus-28 gap and fails when the binding is fixed, which is the signal to
+delete the bands. Bumping `windows` is not that signal: 0.62.2 has all three
+defects. Building the brush through a hand-written vtable entry is the other
+option, and it is a real cost — the 28-byte struct and the `riid` have to be
+declared, and the `ID2D1LinearGradientBrush` methods cannot be called at all.
 
 ## Choice channel
 

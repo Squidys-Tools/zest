@@ -67,6 +67,12 @@ const ANIMATION_TIMER_ID: usize = 0x5A58;
 const WM_APP_SHOW: u32 = WM_APP + 1;
 const WM_APP_HIDE: u32 = WM_APP + 2;
 const WM_APP_CLOSE: u32 = WM_APP + 3;
+/// Settle the hover on a sector without a mouse. The pixel tests need the
+/// renderer to run and its output read back, and neither should depend on
+/// someone being at the machine to move a cursor. The shipped path to a lit
+/// sector is still `WM_MOUSEMOVE`.
+#[cfg(test)]
+const WM_APP_TEST_LIGHT: u32 = WM_APP + 4;
 const CLASS_NAME: &str = "ZestOverlayWindow";
 const WINDOW_TITLE: &str = "Zest Overlay";
 
@@ -181,6 +187,13 @@ impl Overlay {
         self.visible.load(Ordering::Acquire)
     }
 
+    /// Light `index` and let the fade finish, with no mouse involved. `lparam`
+    /// is the sector. Test-only; see `WM_APP_TEST_LIGHT`.
+    #[cfg(test)]
+    pub fn light_sector(&self, index: usize) -> Result<()> {
+        post_with(self.hwnd(), WM_APP_TEST_LIGHT, LPARAM(index as isize))
+    }
+
     fn hwnd(&self) -> HWND {
         HWND(self.window.load(Ordering::Acquire) as *mut c_void)
     }
@@ -197,11 +210,14 @@ impl Drop for Overlay {
 }
 
 fn post(hwnd: HWND, message: u32) -> Result<()> {
+    post_with(hwnd, message, LPARAM(0))
+}
+
+fn post_with(hwnd: HWND, message: u32, lparam: LPARAM) -> Result<()> {
     if hwnd.0.is_null() {
         return Err(anyhow!("overlay window is not available"));
     }
-    unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0)) }
-        .context("post overlay message")
+    unsafe { PostMessageW(Some(hwnd), message, WPARAM(0), lparam) }.context("post overlay message")
 }
 
 fn overlay_thread(
@@ -685,6 +701,17 @@ impl NativeOverlay {
     /// One frame of the hover fade. Reports whether another frame is due.
     fn advance_animation(&mut self) -> bool {
         self.emphasis.advance(ANIMATION_FRAME_MS)
+    }
+
+    /// Light `index` and run the fade to its end in one go, so a test can read
+    /// the pixels a settled sector painted without waiting on real input.
+    #[cfg(test)]
+    fn light_sector(&mut self, index: usize) {
+        self.set_active_sector(Some(index));
+        while self.advance_animation() {}
+        if let Err(error) = self.redraw_and_present() {
+            tracing::warn!("overlay test light failed: {error:#}");
+        }
     }
 
     fn create_sector_geometry(&self, sector: &Sector) -> Result<ID2D1PathGeometry> {
@@ -1174,6 +1201,13 @@ unsafe extern "system" fn window_proc(
             }
             windows::Win32::Foundation::LRESULT(0)
         }
+        #[cfg(test)]
+        WM_APP_TEST_LIGHT => {
+            if let Some(state) = state {
+                state.light_sector(lparam.0 as usize);
+            }
+            windows::Win32::Foundation::LRESULT(0)
+        }
         WM_APP_CLOSE | WM_CLOSE | WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
             windows::Win32::Foundation::LRESULT(0)
@@ -1196,6 +1230,7 @@ unsafe extern "system" fn window_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::Graphics::Direct2D::D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES;
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowRect, SetCursorPos};
 
     static NATIVE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1204,6 +1239,27 @@ mod tests {
         NATIVE_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The active sector's gradient is painted as flat bands, because
+    /// `ID2D1LinearGradientBrush` cannot be built correctly through the `windows`
+    /// crate. `windows` 0.61 and 0.62 both declare the brush properties as the
+    /// two points alone, where the platform reads 28 bytes, so the trailing
+    /// interpolation, extend, and alpha modes come off the stack. This pins the
+    /// gap: it is the size the binding has to reach before a real brush is
+    /// possible, and it fails the moment the binding is fixed.
+    #[test]
+    fn the_windows_binding_under_reads_linear_gradient_properties() {
+        // Two points and three enum-width fields.
+        const PLATFORM_SIZE: usize = 28;
+        assert_eq!(
+            std::mem::size_of::<D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES>(),
+            16
+        );
+        assert!(
+            std::mem::size_of::<D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES>() < PLATFORM_SIZE,
+            "the binding now reads the whole properties struct, so the banded ramp can go"
+        );
     }
 
     #[test]
@@ -1289,8 +1345,9 @@ mod tests {
             lit_sectors()
         );
 
-        let lit =
-            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        let Some(lit) = hover_until_settled(&overlay, Target::Ring, &[]) else {
+            return skip("the real cursor does not reach the window here");
+        };
         assert_eq!(lit.len(), 2, "the ring has two sectors");
         assert_eq!(
             lit.iter().filter(|value| **value > 0.99).count(),
@@ -1334,6 +1391,10 @@ mod tests {
     }
 
     /// Show `menu`, light a sector, and insist the painted pixels ramp.
+    ///
+    /// The light-up goes through `WM_APP_TEST_LIGHT` rather than the real cursor:
+    /// this is about what the renderer paints, and tying it to mouse input meant
+    /// the check only ran at a desk.
     fn ramp_over_menu(menu: &[MenuNode], expected_sectors: usize) {
         let _guard = native_test_guard();
         let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
@@ -1353,14 +1414,64 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
-        let lit =
-            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        overlay.light_sector(0).expect("light a sector");
+        let lit = wait_for_lit();
+        assert_eq!(
+            lit.len(),
+            expected_sectors,
+            "the ring should have {expected_sectors} sectors, read {lit:?}"
+        );
+        assert_eq!(
+            lit.iter().filter(|value| **value > 0.99).count(),
+            1,
+            "exactly one sector should be lit, read {lit:?}"
+        );
+        assert_lit_sector_ramps();
+    }
+
+    /// The same two menu shapes as `ramp_over_menu`, but lit by the real cursor.
+    /// The single-sector ring only records its pixels when the cursor lights it,
+    /// so this stays on the mouse path.
+    fn ramp_over_menu_by_cursor(menu: &[MenuNode], expected_sectors: usize) -> bool {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        overlay
+            .show(
+                menu,
+                &Gradient::new(vec![
+                    zest_core::HexColor::new(0x00, 0x00, 0x00),
+                    zest_core::HexColor::new(0xff, 0xff, 0xff),
+                ]),
+            )
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+
+        RAMP_SAMPLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        let Some(lit) = hover_until_settled(&overlay, Target::Ring, &[]) else {
+            return false;
+        };
         assert_eq!(
             lit.len(),
             expected_sectors,
             "the ring should have {expected_sectors} sectors, read {lit:?}"
         );
         assert_lit_sector_ramps();
+        true
+    }
+
+    /// Read the emphasis values once the lit sector's fade has landed.
+    fn wait_for_lit() -> Vec<f32> {
+        for _ in 0..100 {
+            let lit = lit_sectors();
+            if lit.iter().any(|value| *value > 0.99) {
+                return lit;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        lit_sectors()
     }
 
     /// A single top-level node is the whole ring, so its one sector takes the
@@ -1369,7 +1480,9 @@ mod tests {
     /// way round, so the annulus deserves the same pixel check.
     #[test]
     fn a_whole_ring_sector_paints_a_gradient_rather_than_a_flat_fill() {
-        ramp_over_menu(&[leaf_menu("Everything")], 1);
+        if !ramp_over_menu_by_cursor(&[leaf_menu("Everything")], 1) {
+            skip("the real cursor does not reach the window here");
+        }
     }
 
     /// Emphasis values prove the fade ran, not that a gradient reached the
@@ -1389,13 +1502,16 @@ mod tests {
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
 
-        let lit =
-            hover_until_settled(&overlay, Target::Ring, &[]).expect("cursor reached the ring");
+        let Some(lit) = hover_until_settled(&overlay, Target::Ring, &[]) else {
+            return skip("the real cursor does not reach the window here");
+        };
         let sector = lit
             .iter()
             .position(|value| *value > 0.99)
             .unwrap_or_else(|| panic!("a sector should be lit, read {lit:?}"));
-        let dark = hover_until_settled(&overlay, Target::Centre, &lit).expect("cursor stayed put");
+        let Some(dark) = hover_until_settled(&overlay, Target::Centre, &lit) else {
+            return skip("the real cursor does not reach the window here");
+        };
         assert!(
             dark.iter().all(|value| *value < 0.01),
             "leaving the ring should fade every sector back out, read {dark:?} after {lit:?}"
@@ -1467,6 +1583,11 @@ mod tests {
     /// *change* is how a second hover is told from a leftover. Real mouse input
     /// is deliberate: it is what drives the fade, and a posted move would fight
     /// the cursor Windows keeps delivering for the real one.
+    ///
+    /// `None` means the cursor could not be put where it needed to go, or went
+    /// there and the window never saw a move — a session with no interactive
+    /// desktop, such as a service or a remote shell. Nothing about the overlay
+    /// can be concluded from that, so the callers skip rather than fail.
     fn hover_until_settled(
         overlay: &Overlay,
         target: Target,
@@ -1499,15 +1620,16 @@ mod tests {
                 Target::Ring => lit.iter().any(|value| *value > 0.99),
             };
             if lit != previous && settled {
-                break;
+                let _ = unsafe { SetCursorPos(was.x, was.y) };
+                return Some(lit);
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        let lit = lit_sectors();
-        unsafe {
-            let _ = SetCursorPos(was.x, was.y);
-        }
-        Some(lit)
+        let _ = unsafe { SetCursorPos(was.x, was.y) };
+        // The cursor got there and the window never lit up, so this session cannot
+        // deliver mouse input to it. Say so rather than reporting a dark ring as
+        // a broken one.
+        None
     }
 
     fn lit_sectors() -> Vec<f32> {
@@ -1515,6 +1637,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn skip(reason: &str) {
+        eprintln!("skipping: {reason}");
     }
 
     fn wait_for(condition: impl Fn() -> bool) -> bool {

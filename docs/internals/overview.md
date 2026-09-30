@@ -11,7 +11,7 @@ naming, and settings schema belong to `zest-core`, which has no Windows
 dependencies by design. Rendering belongs to `zest-overlay` (Direct2D layered
 window). Background work belongs to `zest-convert` (tokio tasks + FFmpeg
 subprocess). Tray, hotkey, toast, startup, and update checks belong to
-`zest-shell`. The settings form belongs to `zest-settings` (egui). `zest-app`
+`zest-shell`. The settings form belongs to `zest-settings` (gpui). `zest-app`
 only wires them together. See [ARCHITECTURE.md](../ARCHITECTURE.md) for the
 crate map.
 

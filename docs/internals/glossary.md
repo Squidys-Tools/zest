@@ -5,7 +5,7 @@
 | Selection | The files highlighted in Explorer/Desktop when the hotkey fires. |
 | Ring 1 | Category ring: Convert / Archive / Extract, filtered per selection. |
 | Ring 2 | Target ring after picking a category (formats, archive kinds). |
-| WIC | Windows Imaging Component; primary image codec path. |
+| WIC | Windows Imaging Component. Dropped as the image codec path; see [conversion engines](conversion-engines.md). |
 | HEVC extension | Optional OS codec needed for HEIC work; Zest detects and guides. |
 | Toast | The shell notification confirming done/error. The only completion signal. |
 | Per-user install | `%LOCALAPPDATA%\Zest\`, no elevation, HKCU Run key for startup. |
