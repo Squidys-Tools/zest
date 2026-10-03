@@ -14,3 +14,7 @@ tracing.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+# Decodes the single selected image shown in the middle of the dial. The same
+# crate the convert engine uses, so the preview reads exactly the formats the
+# engine can already handle and adds no codec surface of its own.
+image.workspace = true

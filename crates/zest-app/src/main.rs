@@ -182,7 +182,7 @@ fn show_overlay(overlay: &Overlay, shown: &mut Option<Selection>) {
         // Selection unknown here; picking a leaf re-reads it.
         Err(()) => (None, fallback_menu()),
     };
-    *shown = if show_menu(overlay, &menu) {
+    *shown = if show_menu(overlay, &menu, selection.as_ref()) {
         selection
     } else {
         None
@@ -197,7 +197,7 @@ fn show_convert_overlay(overlay: &Overlay, shown: &mut Option<Selection>) {
             *shown = None;
             return;
         }
-        *shown = show_menu(overlay, &menu).then_some(selection);
+        *shown = show_menu(overlay, &menu, Some(&selection)).then_some(selection);
     }
 }
 
@@ -224,15 +224,16 @@ fn fallback_menu() -> Vec<MenuNode> {
 }
 
 /// Show the menu; reports whether it is now on screen. Settings are re-read so a
-/// gradient picked in the settings window shows up on the next hotkey.
-fn show_menu(overlay: &Overlay, menu: &[MenuNode]) -> bool {
+/// gradient picked in the settings window shows up on the next hotkey. The
+/// selection goes along so the middle of the dial can show what it will act on.
+fn show_menu(overlay: &Overlay, menu: &[MenuNode], selection: Option<&Selection>) -> bool {
     if menu.is_empty() {
         tracing::info!("nothing to convert for this selection");
         return false;
     }
     // Re-read on every show so a gradient saved in the settings window takes
     // effect on the next hotkey press, not the next restart.
-    if let Err(error) = overlay.show(menu, &Settings::load().gradient) {
+    if let Err(error) = overlay.show(menu, &Settings::load().gradient, selection) {
         tracing::warn!("overlay show failed: {error:#}");
         return false;
     }

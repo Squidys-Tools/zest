@@ -84,21 +84,25 @@ pub enum MenuAction {
 }
 
 /// One sector in the radial menu. Ring-1 categories carry no action and only
-/// fan out; ring-2 leaves carry exactly one action.
+/// fan out; ring-2 leaves carry exactly one action. `category` is what tells the
+/// two apart without matching on the label, which is how the overlay picks an
+/// icon for a category that has no action yet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MenuNode {
     pub label: String,
     pub action: Option<MenuAction>,
+    pub category: Option<ActionCategory>,
     pub children: Vec<MenuNode>,
 }
 
 impl MenuNode {
     /// Ring-1 category: it fans out, so it has no action of its own.
-    fn category(label: &str, children: Vec<MenuNode>) -> Self {
+    fn category(category: ActionCategory, label: &str, children: Vec<MenuNode>) -> Self {
         debug_assert!(children.iter().all(|child| child.action.is_some()));
         Self {
             label: label.to_string(),
             action: None,
+            category: Some(category),
             children,
         }
     }
@@ -108,6 +112,7 @@ impl MenuNode {
         Self {
             label: label.to_string(),
             action: Some(action),
+            category: None,
             children: Vec::new(),
         }
     }
@@ -142,15 +147,19 @@ pub fn menu_for_selection(sel: &Selection) -> Vec<MenuNode> {
     categories_for_selection(sel)
         .into_iter()
         .map(|category| match category {
-            ActionCategory::Convert => {
-                MenuNode::category("Convert", leaves(convert_targets(kind), convert_ext))
-            }
+            ActionCategory::Convert => MenuNode::category(
+                category,
+                "Convert",
+                leaves(convert_targets(kind), convert_ext),
+            ),
             ActionCategory::Archive => {
-                MenuNode::category("Archive", leaves(archive_targets(), archive_ext))
+                MenuNode::category(category, "Archive", leaves(archive_targets(), archive_ext))
             }
-            ActionCategory::Extract => {
-                MenuNode::category("Extract", vec![MenuNode::leaf("Here", MenuAction::Extract)])
-            }
+            ActionCategory::Extract => MenuNode::category(
+                category,
+                "Extract",
+                vec![MenuNode::leaf("Here", MenuAction::Extract)],
+            ),
         })
         .collect()
 }
@@ -272,5 +281,38 @@ mod tests {
                 ext: "png".to_string()
             })
         );
+    }
+
+    /// The overlay picks a category's icon from `category` rather than from its
+    /// label, because a category has no action. If a node ever carried both, or
+    /// a category lost its category, the ring would draw the wrong picture
+    /// silently — so pin the two as mutually exclusive.
+    #[test]
+    fn a_node_is_either_a_category_or_a_leaf_never_both() {
+        fn check(nodes: &[MenuNode], path: &str) {
+            for node in nodes {
+                match (node.category, node.action.is_some()) {
+                    (Some(_), true) => panic!("{path}/{} is both", node.label),
+                    (Some(_), false) => {
+                        assert!(
+                            !node.children.is_empty(),
+                            "{path}/{} fans out to nothing",
+                            node.label
+                        )
+                    }
+                    (None, true) => assert!(
+                        node.children.is_empty(),
+                        "{path}/{} is a leaf with children",
+                        node.label
+                    ),
+                    (None, false) => panic!("{path}/{} is neither", node.label),
+                }
+                check(&node.children, &format!("{path}/{}", node.label));
+            }
+        }
+        for name in ["a.png", "a.zip", "a.mp3", "a.json"] {
+            check(&menu_for_selection(&sel(&[name])), name);
+            check(&convert_menu_for_selection(&sel(&[name])), name);
+        }
     }
 }

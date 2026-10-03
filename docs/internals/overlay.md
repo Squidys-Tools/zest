@@ -32,6 +32,54 @@ and owns only pixels, blur, and animation. Native precreate, activation, and
 the leaf-click-to-channel path are covered by the overlay crate's Windows
 tests.
 
+## Text, icons, and the centre
+
+Labels go through `ID2D1RenderTarget::DrawText` with an `IDWriteTextFormat` from
+`text.rs`. Text is unaffected by the gradient-brush binding defect below — that
+is a brush, not text — so it is the one piece of the ring's chrome with no
+workaround behind it. A format's size is fixed at creation, and a ring's size
+depends only on its sector count, so `TextStack` caches one format per size,
+quantised to half a point. Formats are set to no wrapping with trailing-word
+trimming: a label longer than its sector becomes `…` rather than bleeding into
+the next one.
+
+`sector_chrome` puts each sector's icon and label on its own radius, and is
+pure, so the placement is asserted without a render target. Label size steps
+down with the sector count (`label_font_size`) because the arc under a label
+shrinks with it; the table tops out at `WIDEST_RING`, which a test pins against
+the widest ring the menu can actually build. Labels are drawn horizontally and
+centred on the arc, so a label wider than its box is trimmed rather than
+rotated — horizontal text stays readable at every angle, which a radial menu
+that rotates its labels does not.
+
+Icons are Lucide's, transcribed from their `d` attributes into `PathOp` runs in
+`icons.rs` and drawn as Direct2D geometry. Keeping them as data means no SVG
+parser and no image decoding: `Shape` maps onto the factory's rounded-rectangle
+and ellipse geometry, and the rest becomes path geometry. SVG arcs are converted
+to cubics there rather than in the renderer, so the geometry maths stays
+testable. Lucide authors its paths at least a full unit inside the 24-unit
+viewbox, which is why the renderer does not inset the outline by half a stroke —
+`every_icon_leaves_room_for_its_own_stroke` pins that, since it is the reason
+there is no inset.
+
+Icon ink flips with the hover: a lit sector's ramp can land under either a light
+or a dark gradient stop, so a sector's label and icon go dark as it lights and
+stay light while it rests.
+
+A sector's icon comes from its node's `MenuNode::category` or `MenuAction`, not
+from its label — a category has no action, so matching on the label would be the
+only other way to tell one from a leaf.
+
+The centre shows a preview for one decodable image, the file's extension
+otherwise, and the count for more than one file. `CentreBadge` decides that from
+the selection without the renderer knowing anything about paths beyond whether
+to attempt a decode, and the decode happens on the overlay thread so a large
+image cannot stall the app's hotkeys. The preview is decoded with the `image`
+crate — the same crate the convert engine uses, so the preview reads exactly the
+formats the engine can already handle — then premultiplied and clipped to a disc
+on the CPU. `ID2D1RenderTarget::PushLayer` on a DC target takes axis-aligned
+bounds only, so a round clip is not available from Direct2D here.
+
 ## Hover animation
 
 `SectorEmphasis` is the testable half of the hover: a lit amount per sector,
