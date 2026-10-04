@@ -7204,6 +7204,7 @@ name = "zest-overlay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
