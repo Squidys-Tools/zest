@@ -76,9 +76,20 @@ the selection without the renderer knowing anything about paths beyond whether
 to attempt a decode, and the decode happens on the overlay thread so a large
 image cannot stall the app's hotkeys. The preview is decoded with the `image`
 crate — the same crate the convert engine uses, so the preview reads exactly the
-formats the engine can already handle — then premultiplied and clipped to a disc
-on the CPU. `ID2D1RenderTarget::PushLayer` on a DC target takes axis-aligned
-bounds only, so a round clip is not available from Direct2D here.
+formats the engine can already handle.
+
+The disc mask is cut on the CPU, in the same pass that premultiplies the pixels
+for `CreateBitmap` on a premultiplied render target: the two need one walk of the
+buffer anyway, so folding the clip in costs one multiply rather than a
+`PushLayer`/`PopLayer` pair per frame. It is this implementation's choice, not a
+limit of Direct2D — `ID2D1RenderTarget::PushLayer` takes a `D2D1_LAYER_PARAMETERS`
+whose `geometricMask` is an `ID2D1Geometry`, so an elliptical clip is available
+there too if a future change wants it.
+
+The preview keeps its own aspect ratio. `image::resize` fits inside a square
+rather than stretching, so the destination rectangle has to as well: the longer
+side is scaled to the disc and the result is centred. Drawing a fitted bitmap
+into a square destination is what stretched a panorama.
 
 ## Hover animation
 

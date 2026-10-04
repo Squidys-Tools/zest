@@ -39,6 +39,9 @@ pub const LABEL_MAX_SIZE: f32 = 13.0;
 pub const LABEL_MIN_SIZE: f32 = 8.0;
 /// Padding either side of a label's box, so it never touches a sector border.
 pub const LABEL_PADDING: f32 = 6.0;
+/// How far inside the inner disc the centre's content sits, as a fraction of the
+/// radius. The disc is stroked 1.5px, so the content has to clear it.
+pub const CENTRE_INSET: f32 = 0.62;
 
 /// Straight-alpha sRGB color, channels in 0.0..=1.0.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -348,6 +351,88 @@ pub fn fitted_label_size(size: f32, measured: f32, available: f32) -> f32 {
         return size;
     }
     (size * available / measured).max(LABEL_MIN_SIZE)
+}
+
+/// Ink for chrome drawn on an unlit sector.
+pub const CHROME_INK: Rgba = Rgba {
+    r: 0.96,
+    g: 0.97,
+    b: 1.0,
+    a: 1.0,
+};
+
+/// Ink for chrome drawn on the bright end of a lit ramp.
+pub const CHROME_INK_ON_BRIGHT: Rgba = Rgba {
+    r: 0.06,
+    g: 0.06,
+    b: 0.08,
+    a: 1.0,
+};
+
+/// The ramp luminance above which chrome goes dark. Rec. 709 weights, the same
+/// ones the pixel read-backs use, so "bright" means the same thing in both.
+const BRIGHT_LUMINANCE: f32 = 0.55;
+
+/// Where along the ring's radius a piece of chrome sits, as a 0.0..=1.0 position
+/// across the ramp. The ramp runs inner edge to outer edge, so this is the same
+/// fraction the bands use.
+fn ramp_fraction(radius: f32) -> f32 {
+    ((radius - RING_INNER_RADIUS) / (RING_OUTER_RADIUS - RING_INNER_RADIUS)).clamp(0.0, 1.0)
+}
+
+/// Relative luminance of a colour, Rec. 709.
+fn luminance(color: Rgba) -> f32 {
+    0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
+}
+
+/// The box the centre's content is drawn into.
+///
+/// A preview keeps its own aspect ratio: the longer side is scaled to the disc
+/// and the result centred, so a panorama is not pulled out to a square. A badge
+/// takes the largest square that stays inside the disc. `None` for an empty
+/// badge, which draws nothing at all.
+pub fn centre_box(preview: Option<(u32, u32)>) -> Option<OverlayBox> {
+    let dial = OVERLAY_SIZE / 2.0;
+    let square = RING_INNER_RADIUS * CENTRE_INSET;
+    let (width, height) = match preview {
+        Some((source_width, source_height)) => {
+            let (source_width, source_height) = (source_width as f32, source_height as f32);
+            let longest = source_width.max(source_height);
+            match longest > 0.0 {
+                true => (
+                    square * 2.0 * source_width / longest,
+                    square * 2.0 * source_height / longest,
+                ),
+                false => (square * 2.0, square * 2.0),
+            }
+        }
+        None => (square * 2.0, square * 2.0),
+    };
+    Some(OverlayBox::new(
+        dial - width / 2.0,
+        dial - height / 2.0,
+        dial + width / 2.0,
+        dial + height / 2.0,
+    ))
+}
+
+/// The ink a piece of chrome should be drawn in, at `radius`, while the sector
+/// underneath it is lit to `emphasis`.
+///
+/// A lit sector's ramp runs from the inner edge to the outer one, and the
+/// gradient is the user's to choose — it can be bright or it can be nearly
+/// black. Dark ink on a bright ramp is readable and light ink is not; dark ink on
+/// a dark ramp is the reverse, and is how a label disappears entirely. So the
+/// ink is chosen from the colour the ramp actually puts under this piece of
+/// chrome, and eased in with the hover like the ramp itself.
+pub fn chrome_ink(stops: &[Rgba], radius: f32, emphasis: f32) -> Rgba {
+    let underneath = ramp_color(stops, ramp_fraction(radius));
+    let target = if luminance(underneath) > BRIGHT_LUMINANCE {
+        CHROME_INK_ON_BRIGHT
+    } else {
+        CHROME_INK
+    };
+    CHROME_INK.lerp(target, emphasis.clamp(0.0, 1.0))
 }
 
 /// An axis-aligned box in overlay coordinates.
@@ -1107,8 +1192,187 @@ mod tests {
     /// Shrinking past the floor buys nothing, because DirectWrite trims what
     /// still does not fit.
     #[test]
-    fn a_label_never_shrinks_below_the_legibility_floor() {
+    fn a_label_that_never_shrinks_below_the_legibility_floor() {
         assert_eq!(fitted_label_size(13.0, 10_000.0, 1.0), LABEL_MIN_SIZE);
+    }
+
+    /// A bright gradient is the common case: the ring's default is orange, and
+    /// dark ink is what stays readable on it.
+    #[test]
+    fn chrome_goes_dark_over_a_bright_ramp() {
+        let bright = vec![
+            Rgba {
+                r: 1.0,
+                g: 0.6,
+                b: 0.2,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 0.9,
+                b: 0.7,
+                a: 1.0,
+            },
+        ];
+        let ink = chrome_ink(&bright, LABEL_RADIUS, 1.0);
+        assert!(
+            ink.r < 0.2 && ink.g < 0.2 && ink.b < 0.2,
+            "a bright ramp should carry dark chrome, read {ink:?}"
+        );
+    }
+
+    /// …and a dark one must not swallow it. The gradient is the user's to pick,
+    /// so a near-black ramp is reachable, and near-black ink on near-black is how
+    /// the labels silently vanished.
+    #[test]
+    fn chrome_stays_light_over_a_dark_ramp() {
+        let dark = vec![
+            Rgba {
+                r: 0.05,
+                g: 0.05,
+                b: 0.08,
+                a: 1.0,
+            },
+            Rgba {
+                r: 0.10,
+                g: 0.10,
+                b: 0.14,
+                a: 1.0,
+            },
+        ];
+        for radius in [LABEL_RADIUS, ICON_RADIUS] {
+            let ink = chrome_ink(&dark, radius, 1.0);
+            assert!(
+                luminance(ink) > 0.8,
+                "a dark ramp should carry light chrome at r={radius}, read {ink:?}"
+            );
+        }
+    }
+
+    /// Chrome must be readable wherever on the ramp it sits, so the choice is
+    /// made per radius: a ramp that is dark at the label and bright at the icon
+    /// needs opposite ink for the two.
+    #[test]
+    fn the_ink_is_chosen_for_the_colour_under_each_piece_of_chrome() {
+        let dark_inner = vec![
+            Rgba {
+                r: 0.02,
+                g: 0.02,
+                b: 0.02,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        let label = chrome_ink(&dark_inner, LABEL_RADIUS, 1.0);
+        let icon = chrome_ink(&dark_inner, ICON_RADIUS, 1.0);
+        assert!(
+            luminance(label) > 0.8,
+            "the label sits over the dark end, so it stays light, read {label:?}"
+        );
+        assert!(
+            luminance(icon) < 0.2,
+            "the icon sits over the bright end, so it goes dark, read {icon:?}"
+        );
+    }
+
+    /// An unlit sector is dark whatever the gradient says, so chrome starts light
+    /// and only flips as the ramp fades in.
+    #[test]
+    fn chrome_starts_light_and_eases_to_whatever_the_ramp_needs() {
+        let dark = vec![Rgba {
+            r: 0.02,
+            g: 0.02,
+            b: 0.02,
+            a: 1.0,
+        }];
+        let resting = chrome_ink(&dark, LABEL_RADIUS, 0.0);
+        assert_eq!(resting, CHROME_INK, "nothing is lit yet");
+        // A bright ramp is the case where the ink actually has to change.
+        let bright = vec![Rgba {
+            r: 1.0,
+            g: 1.0,
+            b: 1.0,
+            a: 1.0,
+        }];
+        let half = chrome_ink(&bright, LABEL_RADIUS, 0.5);
+        assert!(
+            luminance(half) < luminance(CHROME_INK)
+                && luminance(half) > luminance(CHROME_INK_ON_BRIGHT),
+            "halfway through the fade the ink should be between the two, read {half:?}"
+        );
+    }
+
+    /// A radius outside the ring clamps to the ends of the ramp.
+    #[test]
+    fn a_radius_outside_the_ring_clamps_to_the_ends_of_the_ramp() {
+        let stops = vec![
+            Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+            Rgba {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        ];
+        assert_eq!(ramp_fraction(RING_INNER_RADIUS), 0.0);
+        assert_eq!(ramp_fraction(RING_OUTER_RADIUS), 1.0);
+        assert_eq!(ramp_fraction(-100.0), 0.0);
+        assert_eq!(ramp_fraction(1_000.0), 1.0);
+        let _ = chrome_ink(&stops, 1_000.0, 1.0);
+    }
+
+    /// `image::resize` fits inside a square rather than stretching, so the
+    /// destination has to keep the aspect ratio or a 4:1 panorama is pulled out
+    /// to a square.
+    #[test]
+    fn a_preview_box_keeps_the_source_aspect_ratio() {
+        for (source, ratio) in [((96u32, 24u32), 4.0_f32), ((24, 96), 4.0), ((64, 64), 1.0)] {
+            let box_ = centre_box(Some(source)).expect("a preview has a box");
+            let width = box_.right - box_.left;
+            let height = box_.bottom - box_.top;
+            let observed = width.max(height) / width.min(height);
+            assert!(
+                (observed - ratio).abs() < 0.01,
+                "{source:?} should stay {ratio}:1, read {width:.1}x{height:.1}"
+            );
+            let longest = width.max(height);
+            assert!(
+                (longest - RING_INNER_RADIUS * 2.0 * CENTRE_INSET).abs() < 0.01,
+                "the longer side is the one scaled to the disc, read {longest}"
+            );
+        }
+    }
+
+    /// A badge takes the largest square that stays inside the disc.
+    #[test]
+    fn a_badge_box_is_the_square_that_clears_the_discs_border() {
+        let box_ = centre_box(None).expect("a badge has a box");
+        let width = box_.right - box_.left;
+        let height = box_.bottom - box_.top;
+        assert!((width - height).abs() < 0.01, "a badge should be square");
+        assert!(
+            width <= RING_INNER_RADIUS * 2.0,
+            "the badge would overrun the disc, read {width}"
+        );
+    }
+
+    /// Everything the centre draws has to stay on the dial.
+    #[test]
+    fn nothing_the_centre_draws_leaves_the_dial() {
+        for source in [None, Some((96u32, 24u32)), Some((1, 4096)), Some((0, 0))] {
+            let box_ = centre_box(source).expect("a box");
+            assert!(box_.inside_overlay(), "{source:?} produced {box_:?}");
+        }
     }
 
     #[test]

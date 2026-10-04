@@ -13,26 +13,39 @@
 
 use anyhow::{Context, Result};
 use windows::{
-    core::PCWSTR,
-    Win32::Graphics::{
-        Direct2D::{
-            Common::D2D_RECT_F, ID2D1Brush, ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    core::{BOOL, PCWSTR},
+    Win32::{
+        Graphics::{
+            Direct2D::{
+                Common::D2D_RECT_F, ID2D1Brush, ID2D1RenderTarget, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+            },
+            DirectWrite::{
+                DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
+                DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
+                DWRITE_TRIMMING_GRANULARITY_WORD, DWRITE_WORD_WRAPPING_NO_WRAP,
+            },
         },
-        DirectWrite::{
-            DWriteCreateFactory, IDWriteFactory, IDWriteFontCollection, IDWriteTextFormat,
-            DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
-            DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TRIMMING,
-            DWRITE_TRIMMING_GRANULARITY_WORD, DWRITE_WORD_WRAPPING_NO_WRAP,
+        UI::WindowsAndMessaging::{
+            SystemParametersInfoW, NONCLIENTMETRICSW, SPI_GETNONCLIENTMETRICS,
         },
     },
 };
 
-use zest_core::SYSTEM_UI_FONT;
-
 /// The locale asked of DirectWrite. It only picks locale-specific glyph
 /// variants; the ring's labels are short and in whatever language the menu is.
 const LOCALE: &str = "en-us";
+
+/// What `SYSTEM_UI_FONT` literally is. Windows reports it from
+/// `SPI_GETNONCLIENTMETRICS` as a marker meaning "whatever the shell is using",
+/// and DirectWrite has no such family.
+const SYSTEM_UI_FONT_SENTINEL: &str = ".SystemUIFont";
+
+/// The first family tried when the OS does not name one. The sentinel exists
+/// precisely because naming a family outright was not portable, so this is a
+/// last resort rather than the plan.
+const FALLBACK_FAMILY: &str = "Segoe UI";
 
 /// Sizes are rounded to this step before a format is built, so a size that
 /// differs by a fraction reuses the format instead of adding another.
@@ -47,9 +60,80 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Owns the DirectWrite factory and one text format per size in use.
+/// The family name to ask DirectWrite for, as UTF-16.
+///
+/// `SYSTEM_UI_FONT` is the sentinel `.SystemUIFont`, which is not a registered
+/// font family. DirectWrite does not reject it — it silently substitutes its own
+/// default — so the overlay would come up in a font nobody chose, and nothing
+/// would say so. The sentinel is therefore resolved to a real family first: the
+/// shell's message font when the OS names one, otherwise Segoe UI. Each
+/// candidate is checked against the system font collection before use, so a
+/// stripped Windows build falls through instead of failing to draw.
+fn resolve_family(factory: &IDWriteFactory) -> Result<Vec<u16>> {
+    let mut candidates = Vec::new();
+    if let Some(named) = shell_ui_family() {
+        if named != SYSTEM_UI_FONT_SENTINEL {
+            candidates.push(named);
+        }
+    }
+    candidates.push(FALLBACK_FAMILY.to_string());
+
+    let mut collection = None;
+    unsafe { factory.GetSystemFontCollection(&mut collection, false) }
+        .context("read the DirectWrite system font collection")?;
+    let collection = collection.context("DirectWrite returned no font collection")?;
+
+    for candidate in candidates {
+        let name = wide(&candidate);
+        let mut index = 0u32;
+        let mut exists = BOOL(0);
+        let known =
+            unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists) }
+                .is_ok()
+                && exists.as_bool();
+        if known {
+            return Ok(name);
+        }
+        tracing::debug!(family = %candidate, "font family is not installed; trying the next");
+    }
+    // Nothing matched. Segoe UI rather than an error: a substituted font still
+    // tells the user what every action is, and a missing overlay does not.
+    Ok(wide(FALLBACK_FAMILY))
+}
+
+/// The face name the shell uses for message text, if the OS names one.
+///
+/// `SPI_GETNONCLIENTMETRICS` reports the sentinel itself on most builds, which is
+/// not an answer, so the caller still has to check for it.
+fn shell_ui_family() -> Option<String> {
+    let mut metrics = NONCLIENTMETRICSW {
+        cbSize: std::mem::size_of::<NONCLIENTMETRICSW>() as u32,
+        ..Default::default()
+    };
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETNONCLIENTMETRICS,
+            0,
+            Some((&mut metrics) as *mut NONCLIENTMETRICSW as *mut std::ffi::c_void),
+            Default::default(),
+        )
+    }
+    .ok()?;
+    let face: Vec<u16> = metrics.lfMessageFont.lfFaceName.iter().copied().collect();
+    if face.is_empty() {
+        return None;
+    }
+    String::from_utf16(&face)
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+/// Owns the DirectWrite factory, the resolved UI family, and one text format
+/// per size in use.
 pub struct TextStack {
     factory: IDWriteFactory,
+    /// NUL-terminated UTF-16, because that is what `CreateTextFormat` takes.
+    family: Vec<u16>,
     formats: Vec<(f32, IDWriteTextFormat)>,
 }
 
@@ -57,19 +141,20 @@ impl TextStack {
     pub fn new() -> Result<Self> {
         let factory = unsafe { DWriteCreateFactory::<IDWriteFactory>(DWRITE_FACTORY_TYPE_SHARED) }
             .context("create DirectWrite factory")?;
+        let family = resolve_family(&factory)?;
         Ok(Self {
             factory,
+            family,
             formats: Vec::new(),
         })
     }
 
     fn create_format(&self, size: f32) -> Result<IDWriteTextFormat> {
-        let family = wide(SYSTEM_UI_FONT);
         let locale = wide(LOCALE);
         let format = unsafe {
             self.factory
                 .CreateTextFormat(
-                    PCWSTR(family.as_ptr()),
+                    PCWSTR(self.family.as_ptr()),
                     None::<&IDWriteFontCollection>,
                     DWRITE_FONT_WEIGHT_NORMAL,
                     DWRITE_FONT_STYLE_NORMAL,
@@ -159,5 +244,87 @@ impl TextStack {
     /// counts cannot leave one format per past ring alive.
     pub fn clear(&mut self) {
         self.formats.clear();
+    }
+
+    /// The family the ring's labels are drawn in.
+    #[cfg(test)]
+    pub fn family(&self) -> String {
+        let units: Vec<u16> = self
+            .family
+            .iter()
+            .copied()
+            .take_while(|unit| *unit != 0)
+            .collect();
+        String::from_utf16_lossy(&units)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zest_core::SYSTEM_UI_FONT;
+
+    fn known_family(factory: &IDWriteFactory, name: &str) -> bool {
+        let name = wide(name);
+        let mut collection = None;
+        unsafe { factory.GetSystemFontCollection(&mut collection, false) }.expect("collection");
+        let collection = collection.expect("a font collection");
+        let mut index = 0u32;
+        let mut exists = BOOL(0);
+        unsafe { collection.FindFamilyName(PCWSTR(name.as_ptr()), &mut index, &mut exists) }.is_ok()
+            && exists.as_bool()
+    }
+
+    /// `SYSTEM_UI_FONT` is the sentinel `.SystemUIFont`, and DirectWrite has no
+    /// such family. This is the whole reason `resolve_family` exists: pass the
+    /// sentinel to `CreateTextFormat` and DirectWrite does not fail, it quietly
+    /// substitutes its own default, so the ring would come up in a font nobody
+    /// chose with nothing to say so.
+    #[test]
+    fn the_settings_font_sentinel_is_not_a_directwrite_family() {
+        assert_eq!(SYSTEM_UI_FONT, SYSTEM_UI_FONT_SENTINEL);
+        let factory = TextStack::new().expect("DirectWrite");
+        assert!(
+            !known_family(&factory.factory, SYSTEM_UI_FONT),
+            "the sentinel resolved to a real family, so resolve_family can stop"
+        );
+    }
+
+    #[test]
+    fn the_resolved_family_is_one_directwrite_actually_knows() {
+        let stack = TextStack::new().expect("DirectWrite");
+        let family = stack.family();
+        assert!(
+            !family.is_empty(),
+            "an empty family name would fall back silently"
+        );
+        assert_ne!(
+            family, SYSTEM_UI_FONT,
+            "the resolved family must not be the sentinel"
+        );
+        assert!(
+            known_family(&stack.factory, &family),
+            "resolved to {family:?}, which is not installed"
+        );
+    }
+
+    /// A format must come out of every size the ring asks for, and a bad family
+    /// must not be what makes that work.
+    #[test]
+    fn a_format_is_built_for_every_size_the_ring_asks_for() {
+        let mut stack = TextStack::new().expect("DirectWrite");
+        for size in [8.0_f32, 9.5, 10.5, 11.5, 13.0, 34.0] {
+            let format = stack.format_for(size).expect("a text format");
+            let _ = format;
+        }
+        // Quantisation means a near-identical size reuses the format rather than
+        // building a second one.
+        let before = stack.formats.len();
+        stack.format_for(13.1).expect("a text format");
+        assert_eq!(
+            stack.formats.len(),
+            before,
+            "13.1 should quantise onto 13.0"
+        );
     }
 }
