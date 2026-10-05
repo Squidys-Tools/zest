@@ -840,7 +840,7 @@ impl NativeOverlay {
     /// transform would mean adding that dependency to draw a handful of shapes.
     /// The geometry is rebuilt with the ring either way, so baking costs nothing.
     ///
-    /// The outline is not inset by half a stroke: Lucide authors its paths at
+    /// The outline is not inset by half a stroke: the set authors its paths at
     /// least a full unit inside the 24-unit viewbox, so the stroke already lands
     /// inside it. `every_icon_leaves_room_for_its_own_stroke` in `icons.rs` pins
     /// that, because it is the reason there is no inset here.
@@ -916,7 +916,7 @@ impl NativeOverlay {
                     let sink = unsafe { geometry.Open() }.context("open icon geometry sink")?;
                     unsafe {
                         sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-                        // Every Lucide path opens with a move, so a figure is
+                        // Every path opens with a move, so a figure is
                         // only started once the first command is known.
                         let mut open = false;
                         let mut pen = (0.0_f32, 0.0_f32);
@@ -941,25 +941,6 @@ impl NativeOverlay {
                                 PathOp::VerticalTo(vy) => {
                                     sink.AddLine(point(pen.0, *vy));
                                     pen = (pen.0, *vy);
-                                }
-                                PathOp::ArcTo {
-                                    rx,
-                                    ry,
-                                    rotation,
-                                    large,
-                                    sweep,
-                                    to,
-                                } => {
-                                    for [c1, c2, end] in icons::arc_cubics(
-                                        pen, *to, *rx, *ry, *rotation, *large, *sweep,
-                                    ) {
-                                        sink.AddBezier(&D2D1_BEZIER_SEGMENT {
-                                            point1: point(c1.0, c1.1),
-                                            point2: point(c2.0, c2.1),
-                                            point3: point(end.0, end.1),
-                                        });
-                                    }
-                                    pen = *to;
                                 }
                                 PathOp::QuadTo(x1, y1, ex, ey) => {
                                     sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
@@ -1560,10 +1541,10 @@ fn create_sector_geometry(factory: &ID2D1Factory, sector: &Sector) -> Result<ID2
 
 /// Stroke a sector's icon.
 ///
-/// Lucide draws at `stroke-width="2"` in a 24-unit viewbox, so the stroke is
-/// scaled by the same factor the outline was. Round caps would match Lucide
-/// exactly, but `ID2D1Factory::CreateStrokeStyle` takes a properties struct the
-/// `windows` binding declares one field short of the platform's — the same class
+/// The stroke is scaled by the same factor the outline was. Round caps would
+/// match the set exactly, but `ID2D1Factory::CreateStrokeStyle` takes a
+/// properties struct the `windows` binding declares one field short of the
+/// platform's — the same class
 /// of defect as the gradient brush in `docs/internals/overlay.md` — so the
 /// default butt caps are used rather than hand it garbage. At 18px the
 /// difference does not read.

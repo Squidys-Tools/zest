@@ -4,7 +4,7 @@
 //! acrylic/mica blur, active sector = smoothed 1–3 color gradient, inactive =
 //! muted dark gray + thin borders, ~200ms ease-out sector transitions,
 //! center = file thumbnail or multi-file count badge, Segoe UI Variable,
-//! Lucide icons as starting point.
+//! Hugeicons (MIT) as starting point.
 //!
 //! Performance: window is pre-created hidden; activation only reveals it.
 //! WinPie (OSS Rust radial menu) is the architectural reference.
