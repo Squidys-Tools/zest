@@ -38,7 +38,7 @@ Exit: press hotkey → circle at cursor; press Esc → gone.
 - [x] ~200ms ease-out sector transitions; gradient active sector (1–3 colors),
       painted as flat bands until the `windows` bindings can build a real
       gradient brush — see [overlay rendering](internals/overlay.md).
-- [ ] Center thumbnail / multi-file count badge; Lucide icons.
+- [x] Center thumbnail / multi-file count badge; Lucide icons.
 - [ ] Acrylic/mica blur when available; dark-mode default.
 - [x] Pre-created hidden window reveal (no build-on-open).
 
