@@ -9,27 +9,30 @@ use std::{
 
 use anyhow::{anyhow, Context, Result};
 use windows::{
-    core::PCWSTR,
+    core::{Interface, PCWSTR},
     Win32::{
         Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, POINT, RECT, SIZE, WPARAM},
         Graphics::{
             Direct2D::{
                 Common::{
-                    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-                    D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING, D2D1_PIXEL_FORMAT, D2D_SIZE_F,
+                    D2D1_BEZIER_SEGMENT, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED,
+                    D2D1_FIGURE_END_CLOSED, D2D1_FIGURE_END_OPEN, D2D1_FILL_MODE_WINDING,
+                    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
                 },
-                D2D1CreateFactory, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory,
-                ID2D1PathGeometry, ID2D1SolidColorBrush,
+                D2D1CreateFactory, ID2D1Bitmap, ID2D1Brush, ID2D1DCRenderTarget, ID2D1Factory,
+                ID2D1Geometry, ID2D1PathGeometry, ID2D1RenderTarget, ID2D1SolidColorBrush,
                 ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT,
-                D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE,
-                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_RENDER_TARGET_PROPERTIES,
-                D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+                D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                D2D1_BITMAP_PROPERTIES, D2D1_BRUSH_PROPERTIES, D2D1_ELLIPSE,
+                D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_QUADRATIC_BEZIER_SEGMENT,
+                D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE, D2D1_ROUNDED_RECT,
                 D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Gdi::{
-                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS,
-                HGDIOBJ,
+                CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, SelectObject,
+                BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HGDIOBJ,
             },
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -55,11 +58,15 @@ use windows::{
 use windows::Win32::Graphics::Gdi::AC_SRC_ALPHA;
 
 use super::{
-    default_gradient, gradient_stops, ramp_color, Click, MenuChoices, PendingOverlay, Rgba,
-    RingModel, Sector, SectorEmphasis, ANIMATION_FRAME_MS, OVERLAY_SIZE as OVERLAY_SIZE_F32,
-    RING_OUTER_RADIUS,
+    chrome_ink, default_gradient, gradient_stops,
+    icons::{self, PathOp, Shape},
+    label_font_size, ramp_color, sector_chrome,
+    text::TextStack,
+    CentreBadge, Click, MenuChoices, OverlayBox, PendingOverlay, Rgba, RingModel, Sector,
+    SectorEmphasis, ANIMATION_FRAME_MS, CENTRE_INSET, ICON_RADIUS, ICON_SIZE, LABEL_RADIUS,
+    OVERLAY_SIZE as OVERLAY_SIZE_F32, RING_INNER_RADIUS, RING_OUTER_RADIUS,
 };
-use zest_core::{Gradient, MenuAction, MenuNode};
+use zest_core::{Gradient, MenuAction, MenuNode, Selection};
 
 const OVERLAY_SIZE: i32 = OVERLAY_SIZE_F32 as i32;
 const ESCAPE_HOTKEY_ID: i32 = 0x5A57;
@@ -101,6 +108,31 @@ static LIT_SECTORS: Mutex<Vec<f32>> = Mutex::new(Vec::new());
 /// fade ran; these say whether a gradient reached the screen at all.
 #[cfg(test)]
 static RAMP_SAMPLES: Mutex<Vec<(f32, u32)>> = Mutex::new(Vec::new());
+
+/// Whether the centre drew a preview or a badge, and the box it went into.
+#[cfg(test)]
+static CENTRE_DRAW: Mutex<Option<(bool, Option<OverlayBox>)>> = Mutex::new(None);
+
+/// Brightest pixel found inside each sector's icon and label box, and inside the
+/// middle of the disc, on the last frame the renderer drew.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct ChromeSample {
+    icons: Vec<f32>,
+    labels: Vec<f32>,
+    centre: f32,
+    /// Fraction of the preview's own disc that came back painted, 0.0..=1.0.
+    preview_coverage: f32,
+}
+
+#[cfg(test)]
+static CHROME_SAMPLE: Mutex<Option<ChromeSample>> = Mutex::new(None);
+
+/// Luma above this counts as chrome ink. The ring's own fill composites to well
+/// under it: `INACTIVE_FILL` is 0.22–0.28 at 0.82 alpha over transparency, and
+/// `INACTIVE_BORDER` tops out near 0.46, while `CHROME_INK` is 0.96–1.0.
+#[cfg(test)]
+const CHROME_INK_FLOOR: f32 = 140.0;
 
 pub struct Overlay {
     thread: Option<JoinHandle<()>>,
@@ -162,10 +194,23 @@ impl Overlay {
     /// Show `menu` at the cursor, lit with the configured sector `gradient`.
     /// Picking a category replaces the ring; picking a leaf closes the overlay
     /// and hands back the action.
-    pub fn show(&self, menu: &[MenuNode], gradient: &Gradient) -> Result<()> {
+    ///
+    /// `selection` is what the ring's centre previews. It is the same snapshot
+    /// the menu was built from, passed again because the overlay thread has no
+    /// other way to know what the user picked; `None` leaves the centre empty.
+    pub fn show(
+        &self,
+        menu: &[MenuNode],
+        gradient: &Gradient,
+        selection: Option<&Selection>,
+    ) -> Result<()> {
         if menu.is_empty() {
             return Err(anyhow!("overlay menu is empty"));
         }
+        let centre = selection.map_or(CentreBadge::Nothing, CentreBadge::for_selection);
+        let preview = selection
+            .and_then(|selection| centre.preview_path(selection))
+            .map(std::path::Path::to_path_buf);
         {
             let mut pending = self
                 .pending
@@ -174,6 +219,8 @@ impl Overlay {
             *pending = Some(PendingOverlay {
                 ring: RingModel::new(menu.to_vec()),
                 gradient: gradient.clone(),
+                centre,
+                preview,
             });
         }
         post(self.hwnd(), WM_APP_SHOW)
@@ -358,7 +405,12 @@ struct NativeOverlay {
     _render_target: Option<ID2D1DCRenderTarget>,
     _fill_brush: Option<ID2D1SolidColorBrush>,
     _stroke_brush: Option<ID2D1SolidColorBrush>,
+    /// Ink for labels, icons and the centre badge. Recoloured per draw, since
+    /// it flips between light-on-dark and dark-on-lit from one sector to the
+    /// next.
+    _ink_brush: Option<ID2D1SolidColorBrush>,
     factory: ID2D1Factory,
+    text: TextStack,
     ring: RingModel,
     active_sector: Option<usize>,
     /// Per-sector hover fades, 0 inactive to 1 lit.
@@ -369,6 +421,17 @@ struct NativeOverlay {
     accent: D2D1_COLOR_F,
     /// The flat ramp bands per sector on the current ring, inner edge outwards.
     band_geometry: Vec<Option<Vec<ID2D1PathGeometry>>>,
+    /// Each sector's icon, already scaled and positioned in overlay coordinates.
+    /// Rebuilt with the ring, because a sector's place on the dial is part of
+    /// where its icon has to go.
+    icon_geometry: Vec<Vec<ID2D1Geometry>>,
+    /// Label size for the current ring, and the width each label may use.
+    label_size: f32,
+    /// What the centre shows, and the preview decoded for it.
+    centre: CentreBadge,
+    thumbnail: Option<ID2D1Bitmap>,
+    /// Whether `thumbnail` actually decoded, as opposed to there being one.
+    thumbnailed: bool,
     origin: Option<POINT>,
 }
 
@@ -493,7 +556,32 @@ impl NativeOverlay {
                         return Err(error).context("create overlay stroke brush");
                     }
                 };
-            let state = Self {
+            let ink_brush = match render_target
+                .CreateSolidColorBrush(&d2d_colour(super::CHROME_INK), Some(&brush_properties))
+            {
+                Ok(brush) => brush,
+                Err(error) => {
+                    drop(stroke_brush);
+                    drop(fill_brush);
+                    drop(render_target);
+                    release_dc(memory_dc, old_bitmap, bitmap);
+                    return Err(error).context("create overlay ink brush");
+                }
+            };
+            // The factory is thread-affine, so the text stack has to be built on
+            // this thread too — which it is, inside `new`.
+            let text = match TextStack::new() {
+                Ok(text) => text,
+                Err(error) => {
+                    drop(ink_brush);
+                    drop(stroke_brush);
+                    drop(fill_brush);
+                    drop(render_target);
+                    release_dc(memory_dc, old_bitmap, bitmap);
+                    return Err(error);
+                }
+            };
+            let mut state = Self {
                 hwnd: HWND(std::ptr::null_mut()),
                 visible,
                 window,
@@ -503,9 +591,11 @@ impl NativeOverlay {
                 bitmap,
                 old_bitmap,
                 factory,
+                text,
                 _render_target: Some(render_target),
                 _fill_brush: Some(fill_brush),
                 _stroke_brush: Some(stroke_brush),
+                _ink_brush: Some(ink_brush),
                 ring: RingModel::default(),
                 active_sector: None,
                 emphasis: SectorEmphasis::new(0),
@@ -517,6 +607,11 @@ impl NativeOverlay {
                     a: 1.0,
                 },
                 band_geometry: Vec::new(),
+                icon_geometry: Vec::new(),
+                label_size: label_font_size(0),
+                centre: CentreBadge::Nothing,
+                thumbnail: None,
+                thumbnailed: false,
                 origin: None,
             };
             state.redraw_surface()?;
@@ -652,22 +747,46 @@ impl NativeOverlay {
         self.stops = gradient_stops(pending.gradient.colors());
         self.accent = mean_color(&self.stops);
         self.ring = pending.ring;
+        self.centre = pending.centre;
+        self.thumbnail = pending
+            .preview
+            .and_then(|path| self.decode_thumbnail(&path));
+        self.thumbnailed = self.thumbnail.is_some();
         self.relayout_ring();
     }
 
     /// The ring on screen changed shape: point the brushes at the new sector
     /// angles and start it dark.
     fn relayout_ring(&mut self) {
-        self.emphasis.reset(self.ring.sectors.len());
+        let sectors = self.ring.sectors.len();
+        self.emphasis.reset(sectors);
         self.active_sector = None;
         // Bands belong to the shape on screen, so the new ring invalidates them.
         // They are rebuilt per sector the first time that sector lights up.
-        self.band_geometry = (0..self.ring.sectors.len()).map(|_| None).collect();
+        self.band_geometry = (0..sectors).map(|_| None).collect();
+        self.label_size = label_font_size(sectors);
+        self.text.clear();
+        self.icon_geometry = self
+            .ring
+            .sectors
+            .iter()
+            .map(|sector| {
+                let (icon_box, _) = sector_chrome(sector, sectors);
+                self.create_icon_geometry(sector, icon_box)
+                    .unwrap_or_else(|error| {
+                        tracing::warn!("sector icon unavailable: {error:#}");
+                        Vec::new()
+                    })
+            })
+            .collect();
         #[cfg(test)]
         {
             *LIT_SECTORS
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = Vec::new();
+            *CENTRE_DRAW
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
         }
     }
 
@@ -714,66 +833,259 @@ impl NativeOverlay {
         }
     }
 
-    fn create_sector_geometry(&self, sector: &Sector) -> Result<ID2D1PathGeometry> {
-        let start_angle = sector.center - sector.width / 2.0;
-        let end_angle = start_angle + sector.width;
-        let center = OVERLAY_SIZE_F32 / 2.0;
-        let mut center_point = D2D1_ELLIPSE::default().point;
-        center_point.X = center;
-        center_point.Y = center;
-        let mut start_point = D2D1_ELLIPSE::default().point;
-        start_point.X = center + (RING_OUTER_RADIUS * start_angle.cos() as f32);
-        start_point.Y = center + (RING_OUTER_RADIUS * start_angle.sin() as f32);
-        let mut end_point = D2D1_ELLIPSE::default().point;
-        end_point.X = center + (RING_OUTER_RADIUS * end_angle.cos() as f32);
-        end_point.Y = center + (RING_OUTER_RADIUS * end_angle.sin() as f32);
+    /// The geometry for one icon, already scaled and placed inside `icon_box`.
+    ///
+    /// The transform is baked in rather than set with `SetTransform`, because
+    /// `windows` 0.61 does not re-export `windows-numerics` and a per-draw
+    /// transform would mean adding that dependency to draw a handful of shapes.
+    /// The geometry is rebuilt with the ring either way, so baking costs nothing.
+    ///
+    /// The outline is not inset by half a stroke: the set authors its paths at
+    /// least a full unit inside the 24-unit viewbox, so the stroke already lands
+    /// inside it. `every_icon_leaves_room_for_its_own_stroke` in `icons.rs` pins
+    /// that, because it is the reason there is no inset here.
+    fn create_icon_geometry(
+        &self,
+        sector: &Sector,
+        icon_box: OverlayBox,
+    ) -> Result<Vec<ID2D1Geometry>> {
+        let scale = ICON_SIZE / icons::VIEWBOX;
+        let (icon_x, icon_y) = icon_box.center();
+        let origin_x = icon_x - icons::VIEWBOX / 2.0 * scale;
+        let origin_y = icon_y - icons::VIEWBOX / 2.0 * scale;
+        let place = |vx: f32, vy: f32| (origin_x + vx * scale, origin_y + vy * scale);
+        // A geometry point is a `Vector2`, which the `windows` crate does not
+        // re-export. Reaching one through `D2D1_ELLIPSE::default().point` gets at
+        // the type without naming it, the same way the sector geometry does.
+        let point = |vx: f32, vy: f32| {
+            let (x, y) = place(vx, vy);
+            let mut point = D2D1_ELLIPSE::default().point;
+            point.X = x;
+            point.Y = y;
+            point
+        };
 
-        let geometry =
-            unsafe { self.factory.CreatePathGeometry() }.context("create sector geometry")?;
-        let sink = unsafe { geometry.Open() }.context("open sector geometry sink")?;
-        unsafe {
-            sink.SetFillMode(D2D1_FILL_MODE_WINDING);
-            sink.BeginFigure(center_point, D2D1_FIGURE_BEGIN_FILLED);
-            sink.AddLine(start_point);
-            sink.AddArc(&D2D1_ARC_SEGMENT {
-                point: end_point,
-                size: D2D_SIZE_F {
-                    width: RING_OUTER_RADIUS,
-                    height: RING_OUTER_RADIUS,
-                },
-                rotationAngle: 0.0,
-                sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                arcSize: if sector.width > std::f64::consts::PI {
-                    D2D1_ARC_SIZE_LARGE
-                } else {
-                    D2D1_ARC_SIZE_SMALL
-                },
-            });
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+        let icon = sector.icon;
+        let mut built = Vec::with_capacity(icon.shapes().len());
+        for shape in icon.shapes() {
+            let geometry: ID2D1Geometry = match shape {
+                Shape::RoundedRect {
+                    x: rx,
+                    y: ry,
+                    width,
+                    height,
+                    radius,
+                } => {
+                    let (left, top) = place(*rx, *ry);
+                    let (right, bottom) = place(*rx + *width, *ry + *height);
+                    let corner = *radius * scale;
+                    unsafe {
+                        self.factory
+                            .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left,
+                                    top,
+                                    right,
+                                    bottom,
+                                },
+                                radiusX: corner,
+                                radiusY: corner,
+                            })
+                            .context("create icon rounded rectangle")?
+                            .cast()
+                            .context("widen icon rounded rectangle")?
+                    }
+                }
+                Shape::Ellipse { cx, cy, r } => {
+                    let radius = *r * scale;
+                    unsafe {
+                        self.factory
+                            .CreateEllipseGeometry(&D2D1_ELLIPSE {
+                                point: point(*cx, *cy),
+                                radiusX: radius,
+                                radiusY: radius,
+                            })
+                            .context("create icon ellipse")?
+                            .cast()
+                            .context("widen icon ellipse")?
+                    }
+                }
+                Shape::Path(ops) => {
+                    let geometry = unsafe { self.factory.CreatePathGeometry() }
+                        .context("create icon geometry")?;
+                    let sink = unsafe { geometry.Open() }.context("open icon geometry sink")?;
+                    unsafe {
+                        sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+                        // Every path opens with a move, so a figure is
+                        // only started once the first command is known.
+                        let mut open = false;
+                        let mut pen = (0.0_f32, 0.0_f32);
+                        for op in *ops {
+                            match op {
+                                PathOp::MoveTo(vx, vy) => {
+                                    if open {
+                                        sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                    }
+                                    sink.BeginFigure(point(*vx, *vy), D2D1_FIGURE_BEGIN_FILLED);
+                                    open = true;
+                                    pen = (*vx, *vy);
+                                }
+                                PathOp::LineTo(vx, vy) => {
+                                    sink.AddLine(point(*vx, *vy));
+                                    pen = (*vx, *vy);
+                                }
+                                PathOp::HorizontalTo(vx) => {
+                                    sink.AddLine(point(*vx, pen.1));
+                                    pen = (*vx, pen.1);
+                                }
+                                PathOp::VerticalTo(vy) => {
+                                    sink.AddLine(point(pen.0, *vy));
+                                    pen = (pen.0, *vy);
+                                }
+                                PathOp::QuadTo(x1, y1, ex, ey) => {
+                                    sink.AddQuadraticBezier(&D2D1_QUADRATIC_BEZIER_SEGMENT {
+                                        point1: point(*x1, *y1),
+                                        point2: point(*ex, *ey),
+                                    });
+                                    pen = (*ex, *ey);
+                                }
+                                PathOp::CubicTo(x1, y1, x2, y2, ex, ey) => {
+                                    sink.AddBezier(&D2D1_BEZIER_SEGMENT {
+                                        point1: point(*x1, *y1),
+                                        point2: point(*x2, *y2),
+                                        point3: point(*ex, *ey),
+                                    });
+                                    pen = (*ex, *ey);
+                                }
+                                PathOp::Close => {
+                                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                                    open = false;
+                                }
+                            }
+                        }
+                        if open {
+                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                        }
+                    }
+                    unsafe { sink.Close() }.context("close icon geometry sink")?;
+                    geometry.cast().context("widen icon geometry")?
+                }
+            };
+            built.push(geometry);
         }
-        unsafe { sink.Close() }.context("close sector geometry sink")?;
-        Ok(geometry)
+        Ok(built)
     }
 
-    fn redraw_surface(&self) -> Result<()> {
-        let render_target = self
-            ._render_target
+    /// Decode `path` into a bitmap sized for the centre of the dial.
+    ///
+    /// Decoding happens here rather than on the app's event loop, so a slow or
+    /// large image cannot stall the hotkeys. `None` for anything the `image`
+    /// crate cannot read: the centre then falls back to the file's extension,
+    /// which is more useful than an empty disc.
+    fn decode_thumbnail(&self, path: &std::path::Path) -> Option<ID2D1Bitmap> {
+        let render_target = self._render_target.as_ref()?;
+        let image = match image::open(path) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::debug!(file = %path.display(), "centre preview unavailable: {error}");
+                return None;
+            }
+        };
+        let side = (RING_INNER_RADIUS * 2.0 * CENTRE_INSET).round().max(1.0) as u32;
+        // Centre-crop to a square before resizing. The preview is masked to a
+        // disc, so only a square survives it whole: keeping the aspect ratio
+        // instead would leave the disc spanning the shorter side, and a 4:1
+        // panorama would render as a 16px sliver in the middle of a 64px strip.
+        // Cropping the long axis is what a shell thumbnail does anyway.
+        let (source_width, source_height) = (image.width(), image.height());
+        let edge = source_width.min(source_height);
+        let squared = match source_width == source_height {
+            true => image,
+            false => image.crop_imm(
+                (source_width - edge) / 2,
+                (source_height - edge) / 2,
+                edge,
+                edge,
+            ),
+        };
+        let rgba = image::imageops::resize(
+            &squared.to_rgba8(),
+            side,
+            side,
+            image::imageops::FilterType::Triangle,
+        );
+        let pixels = premultiply_within_disc(&rgba, side as f32 / 2.0);
+
+        unsafe {
+            render_target
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: rgba.width(),
+                        height: rgba.height(),
+                    },
+                    Some(pixels.as_ptr().cast()),
+                    rgba.width() * 4,
+                    &D2D1_BITMAP_PROPERTIES {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: windows::Win32::Graphics::Direct2D::Common::D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                    },
+                )
+                .context("create centre preview bitmap")
+                .ok()
+        }
+    }
+
+    /// Paint one frame into the memory DC.
+    ///
+    /// Returns where each sector's chrome went, so the caller can read the
+    /// pixels back from those exact boxes rather than guessing. Nothing is
+    /// recorded here: the read-backs run in `redraw_and_present`, after `EndDraw`,
+    /// so a test that sees a settled frame also sees the frame's samples.
+    fn redraw_surface(&mut self) -> Result<()> {
+        // Split the borrow by field: the ring is read while the text stack is
+        // written, and a `&mut self` helper could not express that.
+        let Self {
+            factory,
+            text,
+            ring,
+            emphasis,
+            stops,
+            accent,
+            band_geometry,
+            icon_geometry,
+            label_size,
+            centre,
+            thumbnail,
+            _render_target,
+            _fill_brush,
+            _stroke_brush,
+            _ink_brush,
+            ..
+        } = self;
+        let render_target = _render_target
             .as_ref()
             .ok_or_else(|| anyhow!("overlay render target unavailable"))?;
-        let fill_brush = self
-            ._fill_brush
+        let factory: &ID2D1Factory = factory;
+        let fill_brush = _fill_brush
             .as_ref()
             .ok_or_else(|| anyhow!("overlay fill brush unavailable"))?;
-        let stroke_brush = self
-            ._stroke_brush
+        let stroke_brush = _stroke_brush
             .as_ref()
             .ok_or_else(|| anyhow!("overlay stroke brush unavailable"))?;
+        let ink_brush = _ink_brush
+            .as_ref()
+            .ok_or_else(|| anyhow!("overlay ink brush unavailable"))?;
         let center = OVERLAY_SIZE_F32 / 2.0;
         let mut outer = D2D1_ELLIPSE::default();
         outer.point.X = center;
         outer.point.Y = center;
         outer.radiusX = RING_OUTER_RADIUS;
         outer.radiusY = RING_OUTER_RADIUS;
+        let sectors = ring.sectors.as_slice();
 
         unsafe {
             render_target.BeginDraw();
@@ -785,33 +1097,27 @@ impl NativeOverlay {
                     b: 0.0,
                     a: 0.0,
                 }));
-                #[cfg(test)]
-                {
-                    *LIT_SECTORS
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.emphasis.values();
-                }
-                for (index, sector) in self.ring.sectors.iter().enumerate() {
-                    let emphasis = self.emphasis.value(index);
+                for (index, sector) in sectors.iter().enumerate() {
+                    let emphasis = emphasis.value(index);
                     let full = sector.width >= std::f64::consts::TAU - f64::EPSILON;
                     let geometry = match full {
                         true => None,
-                        false => Some(self.create_sector_geometry(sector)?),
+                        false => Some(create_sector_geometry(factory, sector)?),
                     };
                     let lit = emphasis > 0.0;
                     let bands = match lit {
-                        true => self.band_geometry.get(index).and_then(Option::as_ref),
+                        true => band_geometry.get(index).and_then(Option::as_ref),
                         false => None,
                     };
                     let fill = match bands {
                         Some(_) => INACTIVE_FILL,
-                        None => mix_color(INACTIVE_FILL, self.accent, emphasis),
+                        None => mix_color(INACTIVE_FILL, *accent, emphasis),
                     };
                     let border = mix_color(
                         INACTIVE_BORDER,
                         D2D1_COLOR_F {
                             a: INACTIVE_BORDER.a,
-                            ..self.accent
+                            ..*accent
                         },
                         emphasis,
                     );
@@ -825,7 +1131,7 @@ impl NativeOverlay {
                         // ramp would show radial seams while the fade runs.
                         for (offset, band) in bands.iter().enumerate() {
                             let color =
-                                ramp_color(&self.stops, (offset as f32 + 0.5) / RAMP_BANDS as f32);
+                                ramp_color(stops, (offset as f32 + 0.5) / RAMP_BANDS as f32);
                             fill_brush.SetColor(&D2D1_COLOR_F {
                                 r: color.r,
                                 g: color.g,
@@ -852,6 +1158,30 @@ impl NativeOverlay {
                             None::<&ID2D1StrokeStyle>,
                         );
                     }
+
+                    // Icon and label go on last, over the sector's fill, so a lit
+                    // ramp cannot paint over them. Each takes its ink from the
+                    // colour the ramp puts under it: the gradient is the user's
+                    // to pick, so it can be bright or nearly black, and one fixed
+                    // choice makes the chrome invisible over one or the other.
+                    let (_, label_box) = sector_chrome(sector, sectors.len());
+                    let icon_ink = d2d_colour(chrome_ink(stops, ICON_RADIUS, emphasis));
+                    let label_ink = d2d_colour(chrome_ink(stops, LABEL_RADIUS, emphasis));
+                    paint_icon(
+                        render_target,
+                        icon_geometry.get(index),
+                        ink_brush,
+                        &icon_ink,
+                    );
+                    paint_label(
+                        text,
+                        render_target,
+                        ink_brush,
+                        sector,
+                        *label_size,
+                        label_box,
+                        &label_ink,
+                    )?;
                 }
 
                 let mut center_ellipse = D2D1_ELLIPSE::default();
@@ -873,12 +1203,19 @@ impl NativeOverlay {
                 });
                 render_target.FillEllipse(&center_ellipse, fill_brush);
                 render_target.DrawEllipse(&center_ellipse, stroke_brush, 1.5, None);
+                // On top of the disc, so the preview sits inside it rather than
+                // under it.
+                paint_centre(text, render_target, ink_brush, centre, thumbnail.as_ref())?;
                 Ok(())
-            })();
+            })(); // `EndDraw` has to run even when the draw failed, or the render
+                  // target stays in a begun state for every frame after it.
             let end_result = render_target
                 .EndDraw(None, None)
                 .context("finish overlay Direct2D draw");
-            draw_result.and(end_result)
+            match (draw_result, end_result) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) | (_, Err(error)) => Err(error),
+            }
         }
     }
 
@@ -913,11 +1250,149 @@ impl NativeOverlay {
         .context("update overlay layered window")
     }
 
-    fn redraw_and_present(&self) -> Result<()> {
+    fn redraw_and_present(&mut self) -> Result<()> {
         self.redraw_surface()?;
+        // The read-backs run here rather than inside the draw, so that a test
+        // which observes a settled frame also observes that frame's samples.
+        // `LIT_SECTORS` is written last, after both pixel scans, because it is
+        // what the tests wait on — publishing it early would let them read the
+        // emphasis of a frame whose pixels had not been looked at yet.
         #[cfg(test)]
-        self.record_active_ramp();
+        {
+            self.record_active_ramp();
+            self.record_chrome();
+            *LIT_SECTORS
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = self.emphasis.values();
+        }
         self.present()
+    }
+
+    /// Read back how bright the brightest pixel got inside each sector's icon and
+    /// label box, plus the middle of the disc and how much of the preview's disc
+    /// was painted at all.
+    ///
+    /// Emphasis values only say a fade ran; these say whether glyphs and outlines
+    /// actually reached the screen. The ring's own fill tops out well below the
+    /// chrome ink, so "something bright landed in the box" is the claim being
+    /// made, and it is read from the DIB the renderer drew into rather than from
+    /// the settings that asked for it.
+    #[cfg(test)]
+    fn record_chrome(&self) {
+        let sectors = self.ring.sectors.as_slice();
+        let chrome: Vec<(OverlayBox, OverlayBox)> = sectors
+            .iter()
+            .map(|sector| sector_chrome(sector, sectors.len()))
+            .collect();
+        let dial = OVERLAY_SIZE_F32 / 2.0;
+        let mut icons = Vec::with_capacity(chrome.len());
+        let mut labels = Vec::with_capacity(chrome.len());
+        for (icon, label) in chrome {
+            icons.push(self.brightest_in(&icon));
+            labels.push(self.brightest_in(&label));
+        }
+        // A disc, not a box: the box's corners reach out into the ring band, where
+        // the sector's own ink lives and would be mistaken for the centre's. The
+        // radius also clears the disc's 1.5px accent border.
+        let centre = self.brightest_in_disc(dial, dial, RING_INNER_RADIUS * 0.8);
+        // Coverage inside the disc the preview is masked to, just inside its rim.
+        // A brightest-pixel reading would not notice a preview that painted one
+        // bright sliver and nothing else, which is exactly the failure.
+        let preview_coverage =
+            self.coverage_in_disc(dial, dial, RING_INNER_RADIUS * CENTRE_INSET * 0.9);
+        *CHROME_SAMPLE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ChromeSample {
+            icons,
+            labels,
+            centre,
+            preview_coverage,
+        });
+    }
+
+    /// The fraction of a disc's pixels that came back at least as bright as
+    /// chrome ink, 0.0..=1.0.
+    #[cfg(test)]
+    fn coverage_in_disc(&self, cx: f32, cy: f32, radius: f32) -> f32 {
+        use windows::Win32::Graphics::Gdi::GetPixel;
+        let mut painted = 0u32;
+        let mut total = 0u32;
+        for y in (cy - radius).floor() as i32..(cy + radius).ceil() as i32 {
+            for x in (cx - radius).floor() as i32..(cx + radius).ceil() as i32 {
+                let dx = x as f32 - cx;
+                let dy = y as f32 - cy;
+                if dx * dx + dy * dy > radius * radius {
+                    continue;
+                }
+                total += 1;
+                let color = unsafe { GetPixel(self.memory_dc, x, y) }.0;
+                let (r, g, b) = (
+                    (color & 0xff) as f32,
+                    ((color >> 8) & 0xff) as f32,
+                    ((color >> 16) & 0xff) as f32,
+                );
+                if 0.2126 * r + 0.7152 * g + 0.0722 * b >= CHROME_INK_FLOOR {
+                    painted += 1;
+                }
+            }
+        }
+        match total {
+            0 => 0.0,
+            _ => painted as f32 / total as f32,
+        }
+    }
+
+    /// The brightest luma inside `box_`, or 0.0 if it is off the surface.
+    #[cfg(test)]
+    fn brightest_in(&self, box_: &OverlayBox) -> f32 {
+        self.brightest_within(
+            box_.left.floor() as i32,
+            box_.top.floor() as i32,
+            box_.right.ceil() as i32,
+            box_.bottom.ceil() as i32,
+            |_x, _y| true,
+        )
+    }
+
+    /// The brightest luma inside a disc of `radius` centred on `(cx, cy)`.
+    #[cfg(test)]
+    fn brightest_in_disc(&self, cx: f32, cy: f32, radius: f32) -> f32 {
+        self.brightest_within(
+            (cx - radius).floor() as i32,
+            (cy - radius).floor() as i32,
+            (cx + radius).ceil() as i32,
+            (cy + radius).ceil() as i32,
+            move |x, y| (x as f32 - cx).powi(2) + (y as f32 - cy).powi(2) <= radius * radius,
+        )
+    }
+
+    #[cfg(test)]
+    fn brightest_within(
+        &self,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        inside: impl Fn(i32, i32) -> bool,
+    ) -> f32 {
+        use windows::Win32::Graphics::Gdi::GetPixel;
+        let mut brightest = 0.0_f32;
+        for y in top.max(0)..bottom.min(OVERLAY_SIZE) {
+            for x in left.max(0)..right.min(OVERLAY_SIZE) {
+                if !inside(x, y) {
+                    continue;
+                }
+                let color = unsafe { GetPixel(self.memory_dc, x, y) }.0;
+                // A memory DC is BGRA, so GetPixel hands back 0x00BBGGRR.
+                let (r, g, b) = (
+                    (color & 0xff) as f32,
+                    ((color >> 8) & 0xff) as f32,
+                    ((color >> 16) & 0xff) as f32,
+                );
+                brightest = brightest.max(0.2126 * r + 0.7152 * g + 0.0722 * b);
+            }
+        }
+        brightest
     }
 
     /// Read back what the lit sector painted, walking its radius from just
@@ -927,13 +1402,19 @@ impl NativeOverlay {
     #[cfg(test)]
     fn record_active_ramp(&self) {
         use windows::Win32::Graphics::Gdi::GetPixel;
-        let Some(index) = self.active_sector else { return };
+        let Some(index) = self.active_sector else {
+            return;
+        };
         if self.emphasis.value(index) < 0.9 {
             return;
         }
         let sector = &self.ring.sectors[index];
         let center = OVERLAY_SIZE_F32 / 2.0;
-        let (sin, cos) = (sector.center.sin() as f32, sector.center.cos() as f32);
+        // Sample off the sector's centre angle, because that is where its icon and
+        // label sit. Reading along the centre would measure the chrome ink rather
+        // than the ramp underneath it.
+        let angle = sector.center + sector.width * 0.25;
+        let (sin, cos) = (angle.sin() as f32, angle.cos() as f32);
         let span = RING_OUTER_RADIUS - super::RING_INNER_RADIUS;
         let samples = (1..=5)
             .map(|step| {
@@ -1004,12 +1485,211 @@ impl Drop for NativeOverlay {
         if self.visible.swap(false, Ordering::AcqRel) {
             let _ = unsafe { UnregisterHotKey(Some(self.hwnd), ESCAPE_HOTKEY_ID) };
         }
+        self.thumbnail = None;
+        self.text.clear();
+        self.icon_geometry.clear();
         self._stroke_brush.take();
+        self._ink_brush.take();
         self._fill_brush.take();
         self.band_geometry.clear();
         self._render_target.take();
         unsafe { release_dc(self.memory_dc, self.old_bitmap, self.bitmap) };
     }
+}
+
+/// The wedge for one sector: from the centre out to the outer edge, along
+/// that sector's own angular span.
+fn create_sector_geometry(factory: &ID2D1Factory, sector: &Sector) -> Result<ID2D1PathGeometry> {
+    let start_angle = sector.center - sector.width / 2.0;
+    let end_angle = start_angle + sector.width;
+    let center = OVERLAY_SIZE_F32 / 2.0;
+    let mut center_point = D2D1_ELLIPSE::default().point;
+    center_point.X = center;
+    center_point.Y = center;
+    let mut start_point = D2D1_ELLIPSE::default().point;
+    start_point.X = center + (RING_OUTER_RADIUS * start_angle.cos() as f32);
+    start_point.Y = center + (RING_OUTER_RADIUS * start_angle.sin() as f32);
+    let mut end_point = D2D1_ELLIPSE::default().point;
+    end_point.X = center + (RING_OUTER_RADIUS * end_angle.cos() as f32);
+    end_point.Y = center + (RING_OUTER_RADIUS * end_angle.sin() as f32);
+
+    let geometry = unsafe { factory.CreatePathGeometry() }.context("create sector geometry")?;
+    let sink = unsafe { geometry.Open() }.context("open sector geometry sink")?;
+    unsafe {
+        sink.SetFillMode(D2D1_FILL_MODE_WINDING);
+        sink.BeginFigure(center_point, D2D1_FIGURE_BEGIN_FILLED);
+        sink.AddLine(start_point);
+        sink.AddArc(&D2D1_ARC_SEGMENT {
+            point: end_point,
+            size: D2D_SIZE_F {
+                width: RING_OUTER_RADIUS,
+                height: RING_OUTER_RADIUS,
+            },
+            rotationAngle: 0.0,
+            sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+            arcSize: if sector.width > std::f64::consts::PI {
+                D2D1_ARC_SIZE_LARGE
+            } else {
+                D2D1_ARC_SIZE_SMALL
+            },
+        });
+        sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+    }
+    unsafe { sink.Close() }.context("close sector geometry sink")?;
+    Ok(geometry)
+}
+
+/// Stroke a sector's icon.
+///
+/// The stroke is scaled by the same factor the outline was. Round caps would
+/// match the set exactly, but `ID2D1Factory::CreateStrokeStyle` takes a
+/// properties struct the `windows` binding declares one field short of the
+/// platform's — the same class
+/// of defect as the gradient brush in `docs/internals/overlay.md` — so the
+/// default butt caps are used rather than hand it garbage. At 18px the
+/// difference does not read.
+fn paint_icon(
+    render_target: &ID2D1RenderTarget,
+    shapes: Option<&Vec<ID2D1Geometry>>,
+    ink: &ID2D1SolidColorBrush,
+    color: &D2D1_COLOR_F,
+) {
+    let Some(shapes) = shapes.filter(|shapes| !shapes.is_empty()) else {
+        return;
+    };
+    let width = ICON_SIZE / icons::VIEWBOX * icons::STROKE_WIDTH;
+    unsafe {
+        ink.SetColor(color);
+        for geometry in shapes {
+            render_target.DrawGeometry(geometry, ink, width, None::<&ID2D1StrokeStyle>);
+        }
+    }
+}
+
+/// Draw a sector's label, centred inside `box_`.
+fn paint_label(
+    text: &mut TextStack,
+    render_target: &ID2D1RenderTarget,
+    ink: &ID2D1SolidColorBrush,
+    sector: &Sector,
+    size: f32,
+    box_: OverlayBox,
+    color: &D2D1_COLOR_F,
+) -> Result<()> {
+    if sector.label.is_empty() {
+        return Ok(());
+    }
+    unsafe { ink.SetColor(color) };
+    // DirectWrite centres the line within the box, so a box taller than the line
+    // is what puts the label where the radius says it should be.
+    text.draw_centered(
+        render_target,
+        &sector.label,
+        size,
+        D2D_RECT_F {
+            left: box_.left,
+            top: box_.top,
+            right: box_.right,
+            bottom: box_.bottom,
+        },
+        ink,
+    )
+}
+
+/// What the middle of the dial shows: a preview for one decodable image, and the
+/// extension or the file count for everything else. Returns whether a preview
+/// What the middle of the dial shows: a preview for one decodable image, and the
+/// extension or the file count for everything else.
+fn paint_centre(
+    text: &mut TextStack,
+    render_target: &ID2D1RenderTarget,
+    ink: &ID2D1SolidColorBrush,
+    badge: &CentreBadge,
+    thumbnail: Option<&ID2D1Bitmap>,
+) -> Result<()> {
+    // The preview is centre-cropped to a square before it reaches here, so a
+    // preview and a badge take the same destination.
+    let previewed = thumbnail.is_some();
+    let drawing = previewed || badge.text().is_some();
+    #[cfg(test)]
+    publish_centre_draw(previewed, drawing.then(super::centre_box));
+    if !drawing {
+        return Ok(());
+    }
+    let rect = super::centre_box();
+    let area = D2D_RECT_F {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    };
+    if let Some(bitmap) = thumbnail {
+        unsafe {
+            render_target.DrawBitmap(
+                bitmap,
+                Some(&area),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
+        }
+        return Ok(());
+    }
+    let label = badge.text().unwrap_or_default();
+    unsafe { ink.SetColor(&d2d_colour(super::CHROME_INK)) };
+    // A count wants reading at a glance, so it is set large rather than sized
+    // per digit; the box above is what keeps it inside the disc.
+    text.draw_centered(
+        render_target,
+        &label,
+        (RING_INNER_RADIUS * 1.4).min(34.0),
+        area,
+        ink,
+    )
+}
+
+/// Publish what the centre drew, so the tests can read back the rectangle the
+/// preview landed in rather than inferring the aspect ratio from pixels.
+#[cfg(test)]
+fn publish_centre_draw(previewed: bool, box_: Option<OverlayBox>) {
+    *CENTRE_DRAW
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((previewed, box_));
+}
+
+/// Premultiply RGBA into BGRA and clip it to a disc of `radius` pixels, centred
+/// on the image.
+///
+/// Two jobs, both because the overlay draws with `ULW_ALPHA` through a
+/// premultiplied render target: the channels have to arrive premultiplied or
+/// every translucent pixel fringes, and the preview has to be round because the
+/// disc it sits in is round.
+///
+/// The mask rides along with the premultiply because both need one walk of the
+/// buffer. Direct2D could do it too — `ID2D1RenderTarget::PushLayer` takes a
+/// `D2D1_LAYER_PARAMETERS` with a `geometricMask` — but that would add a
+/// push/pop pair per frame for a pass that is already happening.
+fn premultiply_within_disc(rgba: &image::RgbaImage, radius: f32) -> Vec<u8> {
+    let (width, height) = rgba.dimensions();
+    let centre_x = (width as f32 - 1.0) / 2.0;
+    let centre_y = (height as f32 - 1.0) / 2.0;
+    let mut out = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = rgba.get_pixel(x, y);
+            let dx = x as f32 - centre_x;
+            let dy = y as f32 - centre_y;
+            // One pixel of feather, so the clipped edge is not a stair-step.
+            let coverage = (radius - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0);
+            let alpha = pixel.0[3] as f32 / 255.0 * coverage;
+            let channel = |value: u8| ((value as f32 / 255.0 * alpha) * 255.0).round() as u8;
+            out.push(channel(pixel.0[2]));
+            out.push(channel(pixel.0[1]));
+            out.push(channel(pixel.0[0]));
+            out.push((alpha * 255.0).round() as u8);
+        }
+    }
+    out
 }
 
 /// A sector is painted either with the flat muted fill or, as it lights up,
@@ -1056,7 +1736,6 @@ fn band_radii(index: u32) -> (f32, f32) {
     (inner, outer)
 }
 
-
 /// One flat color for a gradient: what borders, and the no-brush fallback, use.
 fn mean_color(stops: &[Rgba]) -> D2D1_COLOR_F {
     let count = stops.len().max(1) as f32;
@@ -1076,6 +1755,17 @@ fn mix_color(from: D2D1_COLOR_F, to: D2D1_COLOR_F, amount: f32) -> D2D1_COLOR_F 
         g: mix(from.g, to.g),
         b: mix(from.b, to.b),
         a: mix(from.a, to.a),
+    }
+}
+
+/// The renderer takes Direct2D colours, the chrome policy speaks in the
+/// platform-independent `Rgba`.
+fn d2d_colour(color: Rgba) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: color.a,
     }
 }
 
@@ -1280,7 +1970,7 @@ mod tests {
         let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
         assert!(!overlay.is_visible());
         overlay
-            .show(&test_menu(), &Gradient::default())
+            .show(&test_menu(), &Gradient::default(), None)
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
         unsafe {
@@ -1300,7 +1990,7 @@ mod tests {
         let _guard = native_test_guard();
         let (overlay, mut choices) = Overlay::precreate().expect("precreate overlay");
         overlay
-            .show(&test_menu(), &Gradient::default())
+            .show(&test_menu(), &Gradient::default(), None)
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
 
@@ -1336,6 +2026,7 @@ mod tests {
                     zest_core::HexColor::new(0x00, 0xff, 0x00),
                     zest_core::HexColor::new(0x00, 0x00, 0xff),
                 ]),
+                None,
             )
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
@@ -1406,6 +2097,7 @@ mod tests {
                     zest_core::HexColor::new(0x00, 0x00, 0x00),
                     zest_core::HexColor::new(0xff, 0xff, 0xff),
                 ]),
+                None,
             )
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
@@ -1442,6 +2134,7 @@ mod tests {
                     zest_core::HexColor::new(0x00, 0x00, 0x00),
                     zest_core::HexColor::new(0xff, 0xff, 0xff),
                 ]),
+                None,
             )
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
@@ -1498,7 +2191,7 @@ mod tests {
         let _guard = native_test_guard();
         let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
         overlay
-            .show(&test_menu(), &Gradient::default())
+            .show(&test_menu(), &Gradient::default(), None)
             .expect("show overlay");
         assert!(wait_for(|| overlay.is_visible()));
 
@@ -1532,22 +2225,257 @@ mod tests {
         drop(overlay);
     }
 
+    /// Before this, a sector was a bare wedge: the user had no way to tell which
+    /// action was behind which angle. These read the pixels rather than the
+    /// intent, so a label or icon that silently fails to draw fails the test.
+    #[test]
+    fn every_sector_paints_an_icon_and_a_label() {
+        let sample = chrome_over_menu(&test_menu(), None);
+        assert_eq!(sample.icons.len(), 2, "the ring has two sectors");
+        assert_eq!(sample.labels.len(), 2);
+        for (index, (icon, label)) in sample.icons.iter().zip(&sample.labels).enumerate() {
+            assert!(
+                *icon > CHROME_INK_FLOOR,
+                "sector {index} painted no icon, brightest {icon}"
+            );
+            assert!(
+                *label > CHROME_INK_FLOOR,
+                "sector {index} painted no label, brightest {label}"
+            );
+        }
+    }
+
+    /// Ring 1 of a real Convert menu, and ring 2 of the widest one Zest builds.
+    /// Both are where a label is most likely to overrun its sector.
+    #[test]
+    fn labels_survive_the_widest_ring_zest_builds() {
+        let ring_two: Vec<MenuNode> = ["png", "jpg", "webp", "bmp", "gif", "tiff", "ico"]
+            .iter()
+            .map(|ext| MenuNode {
+                label: (*ext).to_string(),
+                action: Some(MenuAction::Convert {
+                    ext: (*ext).to_string(),
+                }),
+                category: None,
+                children: Vec::new(),
+            })
+            .collect();
+        let sample = chrome_over_menu(&ring_two, None);
+        assert_eq!(sample.labels.len(), 7, "the Convert ring has seven targets");
+        for (index, label) in sample.labels.iter().enumerate() {
+            assert!(
+                *label > CHROME_INK_FLOOR,
+                "target {index} painted no label, brightest {label} across {sample:?}"
+            );
+        }
+        for (index, icon) in sample.icons.iter().enumerate() {
+            assert!(
+                *icon > CHROME_INK_FLOOR,
+                "target {index} painted no icon, brightest {icon} across {sample:?}"
+            );
+        }
+    }
+
+    /// A lone sector takes the annulus path rather than the wedge path, so its
+    /// chrome lands in a different place and deserves its own check.
+    #[test]
+    fn a_whole_ring_sector_still_paints_its_chrome() {
+        let sample = chrome_over_menu(&[leaf_menu("Everything")], None);
+        assert_eq!(sample.icons.len(), 1);
+        assert_eq!(sample.labels.len(), 1);
+        assert!(
+            sample.icons[0] > CHROME_INK_FLOOR,
+            "the whole-ring sector painted no icon, read {sample:?}"
+        );
+        assert!(
+            sample.labels[0] > CHROME_INK_FLOOR,
+            "the whole-ring sector painted no label, read {sample:?}"
+        );
+    }
+
+    #[test]
+    fn several_files_read_as_a_count_in_the_centre() {
+        let selection = Selection::new(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert_eq!(
+            centre_draw().map(|(previewed, _)| previewed),
+            Some(false),
+            "a three-file selection should badge the centre with its count"
+        );
+        assert!(
+            sample.centre > CHROME_INK_FLOOR,
+            "the count badge painted nothing, brightest {}",
+            sample.centre
+        );
+    }
+
+    /// One file that is not an image has no preview to show, so the centre falls
+    /// back to its extension. `Nothing` would leave the user with a blank dial and
+    /// no idea what was picked.
+    #[test]
+    fn a_single_non_image_reads_as_its_extension_in_the_centre() {
+        let selection = Selection::new(vec!["bundle.zip".into()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert_eq!(
+            centre_draw().map(|(previewed, _)| previewed),
+            Some(false),
+            "an extension badge is not a preview"
+        );
+        assert!(
+            sample.centre > CHROME_INK_FLOOR,
+            "the extension badge painted nothing, brightest {}",
+            sample.centre
+        );
+    }
+
+    #[test]
+    fn an_empty_selection_leaves_the_centre_empty() {
+        let sample = chrome_over_menu(&test_menu(), Some(&Selection::default()));
+        assert_eq!(
+            centre_draw().map(|(previewed, box_)| (previewed, box_.is_none())),
+            Some((false, true)),
+            "nothing selected should leave the middle of the dial blank"
+        );
+        assert!(
+            sample.centre < CHROME_INK_FLOOR,
+            "the centre should be bare, brightest {}",
+            sample.centre
+        );
+    }
+
+    /// Write a preview fixture of the given size to the temp directory.
+    ///
+    /// A bright checkerboard rather than a gradient: the coverage assertions are
+    /// about geometry — does the preview fill the disc — and a gradient with dark
+    /// corners would read as "not painted" no matter how much of it there is. Both
+    /// squares clear the chrome-ink floor, and the checker is obvious in a
+    /// screenshot if the shape ever goes wrong again.
+    fn preview_fixture(name: &str, width: u32, height: u32) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(name);
+        let image = image::RgbaImage::from_fn(width, height, |x, y| {
+            let light = (x / 8 + y / 8) % 2 == 0;
+            let shade = if light { 250 } else { 170 };
+            image::Rgba([shade, shade, shade, 255])
+        });
+        image.save(&path).expect("write preview fixture");
+        path
+    }
+
+    /// A single image gets a real preview. The file is written next to the test
+    /// binary so the decode has something real to read.
+    #[test]
+    fn a_single_image_previews_in_the_centre() {
+        let path = preview_fixture("zest-overlay-preview-test.png", 24, 24);
+        let selection = Selection::new(vec![path.clone()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert_eq!(
+            centre_draw().map(|(previewed, _)| previewed),
+            Some(true),
+            "a decodable image should preview rather than badge its extension"
+        );
+        assert!(
+            sample.centre > CHROME_INK_FLOOR,
+            "the preview painted nothing, brightest {}",
+            sample.centre
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A wide preview is centre-cropped to a square rather than squeezed, so it
+    /// still fills the disc. The earlier version kept the aspect ratio and then
+    /// masked to the shorter side, which left a 96×24 preview rendering as a 16px
+    /// sliver in the middle of a 64px strip — one bright pixel in a big black
+    /// square is still "something painted", which is why coverage is the thing to
+    /// measure rather than brightness.
+    #[test]
+    fn a_wide_preview_fills_the_disc_rather_than_a_sliver() {
+        let path = preview_fixture("zest-overlay-wide-preview-test.png", 96, 24);
+        let selection = Selection::new(vec![path.clone()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert!(
+            sample.preview_coverage > 0.7,
+            "a 4:1 preview should fill the disc, read {:.0}% coverage",
+            sample.preview_coverage * 100.0
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The mirror case, and the same failure mode.
+    #[test]
+    fn a_tall_preview_fills_the_disc_rather_than_a_sliver() {
+        let path = preview_fixture("zest-overlay-tall-preview-test.png", 24, 96);
+        let selection = Selection::new(vec![path.clone()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert!(
+            sample.preview_coverage > 0.7,
+            "a 1:4 preview should fill the disc, read {:.0}% coverage",
+            sample.preview_coverage * 100.0
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The preview's destination is the same square a badge takes, because the
+    /// preview is squared before it reaches the renderer.
+    #[test]
+    fn a_preview_lands_in_the_same_square_a_badge_does() {
+        let preview = preview_fixture("zest-overlay-shape-test.png", 96, 24);
+        chrome_over_menu(&test_menu(), Some(&Selection::new(vec![preview.clone()])));
+        let (previewed, preview_box) = centre_draw().expect("a frame was drawn");
+        assert!(previewed);
+        let preview_box = preview_box.expect("a preview was drawn");
+
+        let selection = Selection::new(vec!["bundle.zip".into()]);
+        chrome_over_menu(&test_menu(), Some(&selection));
+        let (_, badge_box) = centre_draw().expect("a frame was drawn");
+        assert_eq!(
+            preview_box,
+            badge_box.expect("a badge was drawn"),
+            "a preview and a badge share one destination"
+        );
+        let _ = std::fs::remove_file(&preview);
+    }
+
+    /// A file the `image` crate cannot read must not take the whole overlay down
+    /// with it: the centre falls back to the extension and the ring still paints.
+    #[test]
+    fn an_undecodable_image_falls_back_rather_than_failing() {
+        let path = std::env::temp_dir().join("zest-overlay-broken-preview.png");
+        std::fs::write(&path, b"this is not a png").expect("write broken fixture");
+        let selection = Selection::new(vec![path.clone()]);
+        let sample = chrome_over_menu(&test_menu(), Some(&selection));
+        assert_eq!(
+            centre_draw().map(|(previewed, _)| previewed),
+            Some(false),
+            "a broken png should badge its extension instead of previewing nothing"
+        );
+        assert!(
+            sample.icons[0] > CHROME_INK_FLOOR,
+            "the ring should still paint, read {sample:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The two-sector ring the app shows for a single image: `Convert` fans out,
+    /// `Archive` does not.
     fn test_menu() -> Vec<MenuNode> {
         vec![
             MenuNode {
                 label: "Convert".to_string(),
                 action: None,
+                category: Some(zest_core::ActionCategory::Convert),
                 children: vec![MenuNode {
                     label: "png".to_string(),
                     action: Some(MenuAction::Convert {
                         ext: "png".to_string(),
                     }),
+                    category: None,
                     children: Vec::new(),
                 }],
             },
             MenuNode {
                 label: "Archive".to_string(),
                 action: None,
+                category: Some(zest_core::ActionCategory::Archive),
                 children: Vec::new(),
             },
         ]
@@ -1558,6 +2486,7 @@ mod tests {
         MenuNode {
             label: label.to_string(),
             action: None,
+            category: None,
             children: Vec::new(),
         }
     }
@@ -1637,6 +2566,45 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    /// Show `menu` with `selection`, wait for a frame, and hand back what the
+    /// chrome read-back found.
+    ///
+    /// This is the path that does not need a cursor: showing the overlay paints a
+    /// frame with everything on it, so the read-back has something to look at
+    /// before anyone moves the mouse.
+    fn chrome_over_menu(menu: &[MenuNode], selection: Option<&Selection>) -> ChromeSample {
+        let _guard = native_test_guard();
+        let (overlay, _choices) = Overlay::precreate().expect("precreate overlay");
+        CHROME_SAMPLE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        overlay
+            .show(menu, &Gradient::default(), selection)
+            .expect("show overlay");
+        assert!(wait_for(|| overlay.is_visible()));
+        for _ in 0..100 {
+            if let Some(sample) = chrome_sample() {
+                return sample;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the renderer never recorded a frame of chrome to read back");
+    }
+
+    fn chrome_sample() -> Option<ChromeSample> {
+        CHROME_SAMPLE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn centre_draw() -> Option<(bool, Option<OverlayBox>)> {
+        *CENTRE_DRAW
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn skip(reason: &str) {
