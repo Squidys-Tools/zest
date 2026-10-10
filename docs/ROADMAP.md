@@ -52,7 +52,7 @@ Exit: category selection replaces the current ring; same action always at the sa
       (`convert::image`). WIC was dropped: `windows` 0.61 cannot encode through
       it (unbound `EndWrite`, unusable encoder property bags) and could not
       honour JPEG quality. Evidence in `docs/internals/conversion-engines.md`.
-- [ ] `resvg` fallback; SVG input.
+- [x] `resvg` fallback; SVG input.
 - [x] Outputs: PNG, JPG, BMP, GIF, TIFF, WebP, ICO.
 - [x] JPEG quality slider (1–100) wired through.
 - [ ] HEIC decode (HEVC). Likely via the Phase 4 FFmpeg subprocess, which is
