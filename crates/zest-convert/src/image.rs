@@ -12,9 +12,9 @@
 //!   fails outright.
 //!
 //! `image` covers every advertised target except HEIC and PDF, and honours
-//! `jpeg_quality`. HEIC needs HEVC decoding, which nothing here does yet; the
-//! error says so instead of pretending a codec is missing. `resvg` for SVG
-//! input is SQU-39.
+//! `jpeg_quality`. SVG input is rasterized with `resvg`. HEIC needs HEVC
+//! decoding, which nothing here does yet; the error says so instead of
+//! pretending a codec is missing.
 
 use super::{ConvertError, Job};
 use std::path::PathBuf;
@@ -29,6 +29,9 @@ use zest_core::Settings;
 pub const OUTPUTS: &[&str] = &[
     "png", "jpg", "bmp", "gif", "tiff", "webp", "heic", "ico", "pdf",
 ];
+
+const MAX_SVG_DIMENSION: f32 = 16_384.0;
+const MAX_SVG_PIXELS: u64 = 16 * 1024 * 1024;
 
 pub async fn convert(job: &Job, settings: &Settings) -> Result<PathBuf, ConvertError> {
     let ext = job.output_ext.as_str();
@@ -78,15 +81,88 @@ fn transcode(
     ext: &str,
     jpeg_quality: u8,
 ) -> Result<(), ConvertError> {
-    let source = image::open(input).map_err(|e| {
+    let rgba = if input
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
+    {
+        rasterize_svg(input)?
+    } else {
+        image::open(input)
+            .map_err(|e| {
+                ConvertError::Io(format!(
+                    "{} cannot be read as an image: {e}",
+                    input.display()
+                ))
+            })?
+            .to_rgba8()
+    };
+    let (width, height) = (rgba.width(), rgba.height());
+    write(output, ext, rgba.as_raw(), width, height, jpeg_quality)
+}
+
+fn rasterize_svg(input: &std::path::Path) -> Result<image::RgbaImage, ConvertError> {
+    let data = std::fs::read(input)
+        .map_err(|e| ConvertError::Io(format!("cannot read SVG {}: {e}", input.display())))?;
+    let mut options = resvg::usvg::Options {
+        resources_dir: input.parent().and_then(|parent| {
+            if parent.as_os_str().is_empty() {
+                None
+            } else {
+                Some(std::fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf()))
+            }
+        }),
+        ..Default::default()
+    };
+    options.fontdb_mut().load_system_fonts();
+
+    let tree = resvg::usvg::Tree::from_data(&data, &options)
+        .map_err(|e| ConvertError::Io(format!("{} is not a valid SVG: {e}", input.display())))?;
+    let size = tree.size();
+    let (width, height) = (
+        size.width().round().max(1.0),
+        size.height().round().max(1.0),
+    );
+    if width > MAX_SVG_DIMENSION
+        || height > MAX_SVG_DIMENSION
+        || u64::from(width as u32) * u64::from(height as u32) > MAX_SVG_PIXELS
+    {
+        return Err(ConvertError::Io(format!(
+            "{} is too large to rasterize safely ({width}×{height} pixels); reduce its dimensions and try again",
+            input.display()
+        )));
+    }
+
+    let (width, height) = (width as u32, height as u32);
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height).ok_or_else(|| {
         ConvertError::Io(format!(
-            "{} cannot be read as an image: {e}",
+            "cannot allocate a {width}×{height} pixel image for {}",
             input.display()
         ))
     })?;
-    let rgba = source.to_rgba8();
-    let (width, height) = (rgba.width(), rgba.height());
-    write(output, ext, &rgba, width, height, jpeg_quality)
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::default(),
+        &mut pixmap.as_mut(),
+    );
+
+    let mut pixels = pixmap.take();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
+            pixel[..3].fill(0);
+            continue;
+        }
+        for channel in &mut pixel[..3] {
+            *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+        }
+    }
+    image::RgbaImage::from_raw(width, height, pixels).ok_or_else(|| {
+        ConvertError::Io(format!(
+            "could not read rendered SVG pixels from {}",
+            input.display()
+        ))
+    })
 }
 
 fn write(
@@ -229,6 +305,83 @@ mod tests {
     #[test]
     fn svg_is_input_only() {
         assert!(!OUTPUTS.contains(&"svg"));
+    }
+
+    #[tokio::test]
+    async fn svg_input_rasterizes_to_png_at_its_intrinsic_size() {
+        let scratch = Scratch::new("svg-to-png");
+        let source = scratch.join("art.svg");
+        std::fs::write(
+            &source,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="8"><rect width="12" height="8" fill="#ff0000"/></svg>"##,
+        )
+        .expect("write SVG source");
+
+        let mut job = Job::new(&source, "png");
+        let output = crate::dispatch(&mut job, &Settings::default())
+            .await
+            .expect("SVG converts to PNG");
+        let decoded = decode_with_image(&output);
+
+        assert_eq!((decoded.width(), decoded.height()), (12, 8));
+        assert_eq!(decoded.get_pixel(6, 4).0, [255, 0, 0, 255]);
+    }
+
+    #[tokio::test]
+    async fn svg_transparency_is_preserved_for_raster_outputs() {
+        let scratch = Scratch::new("svg-transparency");
+        let source = scratch.join("transparent.svg");
+        std::fs::write(
+            &source,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"><rect x="0" width="1" height="1" fill="#ff0000" opacity="0.5"/></svg>"##,
+        )
+        .expect("write SVG source");
+
+        let mut job = Job::new(&source, "png");
+        let output = crate::dispatch(&mut job, &Settings::default())
+            .await
+            .expect("transparent SVG converts to PNG");
+        let decoded = decode_with_image(&output);
+
+        assert_eq!(decoded.get_pixel(0, 0).0, [255, 0, 0, 128]);
+        assert_eq!(decoded.get_pixel(1, 0).0, [0, 0, 0, 0]);
+    }
+
+    #[tokio::test]
+    async fn invalid_svg_reports_the_source_path() {
+        let scratch = Scratch::new("invalid-svg");
+        let source = scratch.join("broken.svg");
+        std::fs::write(&source, "<svg>").expect("write invalid SVG");
+
+        let mut job = Job::new(&source, "png");
+        let error = crate::dispatch(&mut job, &Settings::default())
+            .await
+            .expect_err("malformed SVG must fail");
+
+        assert!(error.to_string().contains("broken.svg"), "{error}");
+        assert!(!scratch.join("broken.png").exists());
+    }
+
+    #[tokio::test]
+    async fn oversized_svg_is_rejected_before_output_creation() {
+        let scratch = Scratch::new("oversized-svg");
+        let source = scratch.join("large.svg");
+        std::fs::write(
+            &source,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="5000" height="5000"/>"#,
+        )
+        .expect("write SVG source");
+
+        let mut job = Job::new(&source, "png");
+        let error = crate::dispatch(&mut job, &Settings::default())
+            .await
+            .expect_err("oversized SVG must be rejected");
+
+        assert!(
+            error.to_string().contains("reduce its dimensions"),
+            "{error}"
+        );
+        assert!(!scratch.join("large.png").exists());
     }
 
     #[test]

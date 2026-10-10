@@ -6,8 +6,10 @@ task. Engines land one at a time: images → media → archives → text.
 
 ## Images (`convert::image`)
 
-Pure `image`, both directions. It covers every advertised output except HEIC and
-PDF, and it is where `jpeg_quality` is applied.
+`image` handles raster formats in both directions; `resvg` rasterizes SVG input
+at its intrinsic size before the usual output encoder runs. SVG stays
+input-only. The engine covers every advertised output except HEIC and PDF, and
+it is where `jpeg_quality` is applied.
 
 WIC was the planned primary path and this section used to say so. It is not
 usable through `windows` 0.61, verified rather than assumed:
@@ -30,8 +32,8 @@ Two consequences worth remembering:
 - **JPEG has no alpha.** Transparency is composited onto white, not dropped,
   because dropping it leaves transparent pixels black.
 
-SVG input needs `resvg` (SQU-39). PDF output belongs to `convert::text`
-(SQU-51), and the image engine rejects it rather than half-doing it.
+PDF output belongs to `convert::text` (SQU-51), and the image engine rejects it
+rather than half-doing it.
 
 ## Media (`convert::media`)
 
