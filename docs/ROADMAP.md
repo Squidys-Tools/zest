@@ -57,7 +57,7 @@ Exit: category selection replaces the current ring; same action always at the sa
 - [x] JPEG quality slider (1–100) wired through.
 - [ ] HEIC decode (HEVC). Likely via the Phase 4 FFmpeg subprocess, which is
       already a committed dependency and decodes HEVC (SQU-38).
-- [ ] PDF output from the text engine (SQU-51).
+- [x] PDF output from the text engine (SQU-51).
 
 Exit: PNG → JPG/WebP beside the original with collision numbering. (PDF is
 covered by Phase 6.)
@@ -87,9 +87,9 @@ Exit: mixed selection → zip; zip → Extract restores contents.
 
 ## Phase 6 — Text engine + settings window
 
-- [ ] Serde conversions between TXT, CSV, JSON, XML, YAML, TOML, Markdown
+- [x] Serde conversions between TXT, CSV, JSON, XML, YAML, TOML, Markdown
       where meaningful (structured stays structured).
-- [ ] Markdown→PDF simple: fixed-width text, basic pagination.
+- [x] Markdown→PDF simple: fixed-width text, basic pagination.
 - [x] gpui settings window in parallel (independent): hotkey recorder,
       quality presets, output location, theme, font dropdown, 1–3 gradient
       pickers, startup checkbox, update cadence, lossy-warning toggle.

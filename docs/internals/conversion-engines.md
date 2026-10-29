@@ -66,10 +66,18 @@ Lossless preset applies (never for GIF).
 ## Text (`convert::text`)
 
 Serde ecosystem: `serde_json`, `serde_yaml`, `toml`, `quick-xml`, `csv`.
-Conversions stay structured → structured where meaningful.
+Structured formats convert through a `serde_json::Value` interchange:
+`json`/`yaml`/`toml`/`xml`/`csv` in any direction, with format limits surfaced
+as errors rather than silent loss — CSV needs a top-level array of flat
+records, TOML a top-level object (and has no `null`), XML input unwraps the
+document root (`@attr` attributes, text-only elements collapsed from `$text`)
+and XML output re-wraps under `<root>`. `txt`/`md` are passthrough targets
+for any text input (md→txt renders the Markdown to plain text), and txt/md
+cannot become structured. `pdf` is output-only.
 
-Markdown-to-PDF is deliberately simple for MVP: clean fixed-width text with
-basic pagination. No fancy layout.
+Markdown/text-to-PDF is deliberately simple for MVP and hand-rolled rather
+than a dependency: Letter pages, 10pt Courier (a base-14 font, so nothing to
+embed), word-wrap at 84 columns, 57 rows per page, uncompressed streams.
 
 ## Archives (`convert::archive`)
 

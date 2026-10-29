@@ -15,8 +15,8 @@ Zest would rather omit a target than offer one that always fails:
 
 - **HEIC** is HEVC in a container and nothing decodes HEVC yet, so it is not
   offered as an input you can convert, nor as an output.
-- **PDF** is a text-engine format, not an image one, and the text engine is
-  still to come.
+- **PDF** is a text-engine format, not an image one — select a text or
+  Markdown file to produce one.
 
 SVG is rasterized at its intrinsic dimensions and can be converted to any
 supported raster output. It is input-only.
@@ -44,11 +44,26 @@ targets (WAV and FLAC are lossless and have no bitrate knob).
 
 ## Text and data
 
-TXT, CSV, JSON, XML, YAML, TOML, and Markdown convert between each other where
-the conversion is meaningful (structured formats stay structured).
+In: TXT, CSV, JSON, XML, YAML, TOML, Markdown.
+Out: TXT, CSV, JSON, XML, YAML, TOML, Markdown, PDF.
 
-Markdown-to-PDF is intentionally simple for MVP: clean fixed-width text with
-basic pagination, nothing fancy.
+The structured formats — CSV, JSON, XML, YAML, TOML — convert between each
+other through a common data model, so JSON ↔ YAML ↔ TOML round-trips
+losslessly. A few pairs still fail with a clear reason rather than silently
+losing data:
+
+- **CSV** only carries a flat table: it reads as an array of records (every
+  field stays a string) and writing it needs that same shape back.
+- **TOML** needs a top-level object and has no `null`.
+- **XML** output is wrapped in a `<root>` element; on input, attributes show
+  up as `@name` fields and a text-only element collapses to its text.
+- Plain **TXT** and **Markdown** cannot be turned into data — there is no
+  structure to parse.
+
+Anything → TXT or MD is a passthrough (Markdown → TXT strips the markup down
+to plain text), and anything → PDF renders the file as clean fixed-width text
+with basic pagination — deliberately simple for MVP. PDF itself is
+output-only; Zest cannot read PDFs back.
 
 ## Lossy-to-lossy warning
 
