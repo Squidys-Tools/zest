@@ -27,16 +27,20 @@ onto white rather than leaving transparent pixels black.
 ## Video
 
 In: MP4, AVI, MKV, MOV, WMV, FLV, WebM.
-Out: MP4 (H.264 or H.265), WebM, AVI, MKV, MOV, animated GIF.
+Out: MP4 (H.264, or H.265 via the `mp4 (h.265)` leaf), WebM, AVI, MKV, MOV,
+animated GIF.
 
-Handled by the bundled FFmpeg subprocess. Video-to-GIF is special-cased: Zest
-caps resolution and framerate automatically so a GIF does not balloon to
-hundreds of megabytes.
+Handled by an FFmpeg subprocess. Zest looks for `ffmpeg.exe` at
+`%LOCALAPPDATA%\Zest\ffmpeg\` first, then on `PATH`; if neither exists it says
+so and names the fix rather than failing silently. Video-to-GIF is
+special-cased: Zest caps resolution (480px wide) and framerate (15fps)
+automatically so a GIF does not balloon to hundreds of megabytes.
 
 ## Audio
 
-In and out where applicable: MP3, WAV, FLAC, AAC, OGG, WMA, M4A, OPUS.
-Handled by the bundled FFmpeg subprocess.
+In and out: MP3, WAV, FLAC, AAC, OGG, WMA, M4A, OPUS.
+Handled by the same FFmpeg subprocess; the Settings bitrate applies to lossy
+targets (WAV and FLAC are lossless and have no bitrate knob).
 
 ## Text and data
 

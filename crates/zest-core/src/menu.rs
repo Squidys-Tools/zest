@@ -56,11 +56,15 @@ pub fn categories_for_selection(sel: &Selection) -> Vec<ActionCategory> {
 /// on purpose: nothing decodes HEVC yet (SQU-59), and offering a target that
 /// always fails is worse than not offering it. `pdf` is likewise absent because
 /// it belongs to the text engine (SQU-51), not the image one.
+///
+/// `mp4-h265` is a codec pick on the `mp4` target, not a file extension: the
+/// leaf label says so, and `zest-convert::Job` splits it back into
+/// `mp4` + HEVC before a path is ever derived from it.
 pub fn convert_targets(kind: FileKind) -> &'static [&'static str] {
     match kind {
         FileKind::Image => &["png", "jpg", "webp", "bmp", "gif", "tiff", "ico"],
-        FileKind::Video => &["mp4", "webm", "avi", "mkv", "mov", "gif"],
-        FileKind::Audio => &["mp3", "wav", "flac", "aac", "ogg", "m4a", "opus"],
+        FileKind::Video => &["mp4", "mp4-h265", "webm", "avi", "mkv", "mov", "gif"],
+        FileKind::Audio => &["mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus"],
         FileKind::TextData => &["txt", "csv", "json", "xml", "yaml", "toml", "md", "pdf"],
         _ => &[],
     }
@@ -131,6 +135,23 @@ fn convert_ext(ext: &str) -> MenuAction {
     }
 }
 
+/// `mp4-h265` is a codec pick on the `mp4` target, not a real extension; the
+/// label says what the user gets rather than leaking the token.
+fn convert_leaf(target: &str) -> MenuNode {
+    let label = match target {
+        "mp4-h265" => "mp4 (h.265)",
+        other => other,
+    };
+    MenuNode::leaf(label, convert_ext(target))
+}
+
+fn convert_leaves(kind: FileKind) -> Vec<MenuNode> {
+    convert_targets(kind)
+        .iter()
+        .map(|target| convert_leaf(target))
+        .collect()
+}
+
 fn archive_ext(ext: &str) -> MenuAction {
     MenuAction::Archive {
         ext: ext.to_string(),
@@ -147,11 +168,9 @@ pub fn menu_for_selection(sel: &Selection) -> Vec<MenuNode> {
     categories_for_selection(sel)
         .into_iter()
         .map(|category| match category {
-            ActionCategory::Convert => MenuNode::category(
-                category,
-                "Convert",
-                leaves(convert_targets(kind), convert_ext),
-            ),
+            ActionCategory::Convert => {
+                MenuNode::category(category, "Convert", convert_leaves(kind))
+            }
             ActionCategory::Archive => {
                 MenuNode::category(category, "Archive", leaves(archive_targets(), archive_ext))
             }
@@ -167,7 +186,7 @@ pub fn menu_for_selection(sel: &Selection) -> Vec<MenuNode> {
 /// Ring 2 of the Convert category on its own, for the Convert hotkey path.
 pub fn convert_menu_for_selection(sel: &Selection) -> Vec<MenuNode> {
     match sel.files.first() {
-        Some(first) => leaves(convert_targets(classify_path(first)), convert_ext),
+        Some(first) => convert_leaves(classify_path(first)),
         None => vec![],
     }
 }
@@ -201,6 +220,32 @@ mod tests {
         for live in ["png", "jpg", "webp", "bmp", "gif", "tiff", "ico"] {
             assert!(targets.contains(&live), "{live} should be offered");
         }
+    }
+
+    #[test]
+    fn the_video_ring_offers_both_mp4_codecs_and_gif() {
+        let targets = convert_targets(FileKind::Video);
+        for live in ["mp4", "mp4-h265", "webm", "avi", "mkv", "mov", "gif"] {
+            assert!(targets.contains(&live), "{live} should be offered");
+        }
+    }
+
+    #[test]
+    fn the_audio_ring_covers_both_directions_including_wma() {
+        let targets = convert_targets(FileKind::Audio);
+        for live in ["mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", "opus"] {
+            assert!(targets.contains(&live), "{live} should be offered");
+        }
+    }
+
+    #[test]
+    fn the_h265_leaf_reads_as_a_codec_choice_not_a_token() {
+        let menu = convert_menu_for_selection(&sel(&["clip.mp4"]));
+        let leaf = menu
+            .iter()
+            .find(|node| node.action == Some(convert_ext("mp4-h265")))
+            .expect("the h265 leaf exists");
+        assert_eq!(leaf.label, "mp4 (h.265)");
     }
 
     #[test]

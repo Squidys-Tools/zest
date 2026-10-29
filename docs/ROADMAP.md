@@ -65,12 +65,14 @@ covered by Phase 6.)
 ## Phase 4 — Video / audio engine
 
 - [ ] Bundle FFmpeg as a subprocess under `%LOCALAPPDATA%\Zest\ffmpeg\`.
-- [ ] Video in (MP4, AVI, MKV, MOV, WMV, FLV, WebM) → out (MP4 H.264/H.265,
-      WebM, AVI, MKV, MOV, GIF).
-- [ ] Audio both directions (MP3, WAV, FLAC, AAC, OGG, WMA, M4A, OPUS).
-- [ ] Video→GIF auto-caps (480px, 15fps).
-- [ ] Video preset (low/medium/high/lossless) + audio bitrate dropdown wired.
-- [ ] Lossy→lossy warning + Settings toggle.
+      (The engine resolves that path first and falls back to `PATH`; the MSI
+      lay-down is Phase 7.)
+- [x] Video in (MP4, AVI, MKV, MOV, WMV, FLV, WebM) → out (MP4 H.264/H.265 —
+      the `mp4 (h.265)` leaf — WebM, AVI, MKV, MOV, GIF).
+- [x] Audio both directions (MP3, WAV, FLAC, AAC, OGG, WMA, M4A, OPUS).
+- [x] Video→GIF auto-caps (480px, 15fps, palettegen/paletteuse).
+- [x] Video preset (low/medium/high/lossless) + audio bitrate dropdown wired.
+- [x] Lossy→lossy warning + Settings toggle.
 
 Exit: MP4 → GIF/WebM and MP3 → OGG work from the menu with sane sizes.
 
