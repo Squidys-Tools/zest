@@ -140,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
                 if let Err(error) = zest_shell::toast::notify(
                     "Zest update available",
                     &format!(
-                        "Version {version} is on GitHub Releases. Pick “Update” from the tray menu to download it."
+                        "Version {version} is on GitHub Releases. The tray menu offers it after you restart Zest."
                     ),
                 ) {
                     tracing::warn!("update toast failed: {error:#}");
