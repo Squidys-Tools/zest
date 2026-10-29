@@ -12,12 +12,20 @@ Select files and/or folders, open the menu, pick **Archive**, then choose:
 | `.zip` | Best for sharing with anyone |
 | `.tar` | Uncompressed bundle |
 | `.tar.gz` | Compressed bundle |
-| `.gzip` | Single-file compression |
+| `.gz` | Single-file compression: `photo.png` becomes `photo.png.gz` |
+
+Each selected item becomes its own archive: a folder packs with its contents
+under its own name, a file under its file name. Archives land beside the
+original (or in your configured output folder) and never overwrite an
+existing file — a `name (1)` suffix is added instead.
 
 ## Extract
 
-Select a `.zip`, `.tar`, `.tar.gz`, or `.gzip` file and the menu shows
-**Extract** only. Contents land next to the archive.
+Select a `.zip`, `.tar`, `.tar.gz`, `.tgz`, or `.gz` file and the menu shows
+**Extract** only. Contents land next to the archive: zip and tar bundles
+unpack into a folder named after the archive, while a `.gz` decompresses
+back to the single file it was made from. Entries that would escape the
+target folder (`..` paths) are refused rather than extracted.
 
 ## Next steps
 

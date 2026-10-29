@@ -6,8 +6,8 @@
 //! - archive: pure-Rust `zip`/`tar`/`flate2` for MVP (zip/tar/tar.gz/gzip
 //!   create+extract); libarchive swap is a later option if needed.
 //!
-//! MVP order: images → media → archives → text. Media and archive still
-//! validate and stub; the image and text engines are live (SQU-40, SQU-51).
+//! MVP order: images → media → archives → text. All four engines are live
+//! (SQU-40, SQU-49, SQU-51 and the FFmpeg media engine).
 
 pub mod archive;
 pub mod image;
@@ -239,10 +239,10 @@ mod tests {
         let mut job = Job::archive(Path::new("photo.png"), "zip");
         let error = dispatch(&mut job, &Settings::default())
             .await
-            .expect_err("archive engine is still a stub");
+            .expect_err("the input does not exist, so the engine cannot pack it");
         assert!(
-            error.to_string().contains("archive engine"),
-            "unexpected error: {error}"
+            matches!(error, ConvertError::Io(_)),
+            "the archive engine should have run and failed on the missing input: {error}"
         );
     }
 
@@ -286,10 +286,10 @@ mod tests {
         let mut job = Job::extract(Path::new("bundle.zip"));
         let error = dispatch(&mut job, &Settings::default())
             .await
-            .expect_err("extraction engine is still a stub");
+            .expect_err("the archive does not exist, so it cannot be read");
         assert!(
-            error.to_string().contains("archive extraction"),
-            "unexpected error: {error}"
+            matches!(error, ConvertError::Io(_)),
+            "the extract path should have run and failed on the missing input: {error}"
         );
     }
 }

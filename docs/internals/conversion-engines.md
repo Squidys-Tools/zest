@@ -85,6 +85,18 @@ MVP uses pure-Rust `zip` / `tar` / `flate2` for zip, tar, tar.gz, and gzip
 create + extract — no native vcpkg dependency. A libarchive swap remains
 possible later if format coverage demands it.
 
+Naming conventions worth knowing before touching it:
+
+- `gzip` is a stream, not a container, so it compresses a single file to
+  `<file>.gz` (the full name keeps the original extension for the
+  round-trip) and refuses folders — pick a real archive format for those.
+- Extract ignores the configured output folder: contents land beside the
+  archive — zip/tar/tar.gz into a folder named after the archive, a bare
+  `.gz` back to its stripped name — because the menu's leaf is "Here".
+- Zip names are validated against `enclosed_name()` before anything is
+  written; tar entries pass `..`/root/prefix checks per entry, and links
+  and other special entries are skipped rather than followed.
+
 ## Shared rules
 
 - `dispatch` computes the collision-safe sibling path before delegating.
