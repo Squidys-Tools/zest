@@ -20,14 +20,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # rustup is preinstalled on the runner and honours rust-toolchain.toml:
-      # `rustup show` installs the pinned channel with the components the file
-      # lists. The explicit `component add` keeps clippy present even if the
-      # file drifts.
+      # rustup is preinstalled on the runner. With no argument,
+      # `toolchain install` installs exactly what rust-toolchain.toml pins,
+      # components included (clippy); `rustup show` alone does not install.
       - name: Install Rust toolchain
-        run: |
-          rustup show
-          rustup component add clippy
+        run: rustup toolchain install
 
       - uses: Swatinem/rust-cache@v2
 
