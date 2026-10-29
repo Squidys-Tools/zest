@@ -96,12 +96,13 @@ Exit: JSON ↔ YAML ↔ TOML round-trips; settings persist and take effect.
 
 ## Phase 7 — Polish, then packaging
 
-- [ ] Toast notifications on done/error for every job.
-- [ ] Error handling that always says what to do next (HEVC, FFmpeg, bad input).
+- [x] Toast notifications on done/error for every job.
+- [x] Error handling that always says what to do next (HEVC, FFmpeg, bad input).
 - [ ] DPI awareness; cursor-near-edge placement; batch edge cases.
 - [ ] MSI via WiX (per-user, no elevation) + FFmpeg bundled.
-- [ ] Auto-update: GitHub Releases check on startup + daily/weekly/never,
-      prompt on next restart.
+- [x] Auto-update: GitHub Releases check on startup + daily/weekly/never,
+      toast + tray-menu prompt (download stays manual — no MSI fetch yet).
+- [x] HKCU Run-key write/delete behind the startup checkbox.
 - [ ] EV code-signing + AV vendor whitelisting submissions.
 
 Exit: signed MSI installs per-user, converts, notifies, updates.

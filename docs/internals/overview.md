@@ -49,6 +49,6 @@ collision-safe sibling path (`photo.jpg`, `photo (1).jpg`, …).
   it finished. Completion is the toast.
 
 See the [glossary](./glossary.md), the
-[selection resolver](./selection-resolver.md), [overlay](./overlay.md), and
-[conversion engines](./conversion-engines.md) notes, and the
-[development runbook](../operations/development.md).
+[selection resolver](./selection-resolver.md), [overlay](./overlay.md),
+[conversion engines](./conversion-engines.md), and [shell](./shell.md)
+notes, and the [development runbook](../operations/development.md).
