@@ -14,6 +14,7 @@ use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEv
 /// Menu item ids, matched in the `MenuEvent` handler.
 const ID_SHOW: &str = "show";
 const ID_SETTINGS: &str = "settings";
+const ID_UPDATE: &str = "update";
 const ID_QUIT: &str = "quit";
 
 /// A user choice from the tray icon or its menu.
@@ -23,6 +24,8 @@ pub enum TrayAction {
     Show,
     /// Open the settings window.
     Settings,
+    /// Open the GitHub release for the pending update.
+    OpenUpdate,
     /// Shut Zest down.
     Quit,
 }
@@ -74,6 +77,7 @@ fn build_tray(tx: UnboundedSender<TrayAction>) -> Result<tray_icon::TrayIcon> {
         let action = match event.id().as_ref() {
             ID_SHOW => TrayAction::Show,
             ID_SETTINGS => TrayAction::Settings,
+            ID_UPDATE => TrayAction::OpenUpdate,
             ID_QUIT => TrayAction::Quit,
             other => {
                 tracing::debug!(id = other, "unhandled tray menu id");
@@ -108,13 +112,24 @@ fn build_tray(tx: UnboundedSender<TrayAction>) -> Result<tray_icon::TrayIcon> {
     Ok(tray)
 }
 
-/// Show / Settings / separator / Quit.
+/// Show / Settings / [Update] / separator / Quit. The update item only
+/// exists while a newer release is recorded as pending, so the prompt lands
+/// on the restart after the check that found it.
 fn build_menu() -> Result<Menu> {
     let menu = Menu::new();
     menu.append(&MenuItem::with_id(ID_SHOW, "Show", true, None))
         .context("append Show")?;
     menu.append(&MenuItem::with_id(ID_SETTINGS, "Settings…", true, None))
         .context("append Settings")?;
+    if let Some(version) = crate::updater::pending_version() {
+        menu.append(&MenuItem::with_id(
+            ID_UPDATE,
+            format!("Update to Zest {version}…"),
+            true,
+            None,
+        ))
+        .context("append update item")?;
+    }
     menu.append(&PredefinedMenuItem::separator())
         .context("append separator")?;
     menu.append(&MenuItem::with_id(ID_QUIT, "Quit", true, None))

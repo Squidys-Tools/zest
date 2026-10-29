@@ -3,9 +3,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use std::path::Path;
+
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
-use zest_convert::Job;
+use zest_convert::{ConvertError, Job, Operation};
 use zest_core::{
     convert_menu_for_selection, menu_for_selection, MenuAction, MenuNode, Selection, Settings,
 };
@@ -38,7 +40,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(hotkey = %settings.hotkey, "settings loaded");
 
     if cli.settings {
-        return zest_settings::run(settings);
+        let outcome = zest_settings::run(settings);
+        apply_startup_setting();
+        return outcome;
     }
 
     if cli.check_selection {
@@ -53,6 +57,10 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
     };
+
+    // The registry follows settings.json — including edits made while Zest
+    // was not running — so apply the checkbox state on every launch.
+    apply_startup_setting();
 
     let (overlay, mut choices) = Overlay::precreate()?;
     let mut tray_rx = zest_shell::tray::build()?;
@@ -121,13 +129,27 @@ async fn main() -> anyhow::Result<()> {
         open_settings(Some(notice));
     }
 
-    if zest_shell::updater::should_check(settings.update_frequency) {
-        match zest_shell::updater::check_now(env!("CARGO_PKG_VERSION")).await {
-            Ok(Some(v)) => tracing::info!(version = %v, "update available — prompt on restart"),
+    // Off the startup path: a slow network must not leave the hotkeys dead.
+    let update_frequency = settings.update_frequency;
+    tokio::spawn(async move {
+        match zest_shell::updater::check_for_updates(update_frequency, env!("CARGO_PKG_VERSION"))
+            .await
+        {
+            Ok(Some(version)) => {
+                tracing::info!(version = %version, "update available");
+                if let Err(error) = zest_shell::toast::notify(
+                    "Zest update available",
+                    &format!(
+                        "Version {version} is on GitHub Releases. The tray menu offers it after you restart Zest."
+                    ),
+                ) {
+                    tracing::warn!("update toast failed: {error:#}");
+                }
+            }
             Ok(None) => tracing::debug!("up to date"),
-            Err(e) => tracing::warn!("update check failed: {e:#}"),
+            Err(error) => tracing::warn!("update check failed: {error:#}"),
         }
-    }
+    });
 
     tracing::info!("zest running");
     // The selection the visible menu was built from. The overlay never takes
@@ -138,6 +160,11 @@ async fn main() -> anyhow::Result<()> {
             action = tray_rx.recv() => match action {
                 Some(TrayAction::Show) => show_overlay(&overlay, &mut shown),
                 Some(TrayAction::Settings) => open_settings(None),
+                Some(TrayAction::OpenUpdate) => {
+                    if let Err(error) = zest_shell::updater::open_releases_page() {
+                        tracing::warn!("could not open the releases page: {error:#}");
+                    }
+                }
                 Some(TrayAction::Quit) | None => break,
             },
             action = async {
@@ -290,9 +317,80 @@ async fn run_action(choice: &MenuAction, selection: &Selection) {
             "running menu action"
         );
         match zest_convert::dispatch(&mut job, &settings).await {
-            Ok(output) => tracing::info!(output = %output.display(), "done"),
-            Err(error) => tracing::warn!(input = %input.display(), "failed: {error}"),
+            Ok(output) => {
+                tracing::info!(output = %output.display(), "done");
+                notify_done(&job, &output);
+            }
+            Err(error) => {
+                tracing::warn!(input = %input.display(), "failed: {error}");
+                notify_error(&job, &error);
+            }
         }
+    }
+}
+
+/// Past-tense verb for the toast title, per operation.
+fn past_tense(operation: Operation) -> &'static str {
+    match operation {
+        Operation::Convert => "Converted",
+        Operation::Archive => "Archived",
+        Operation::Extract => "Extracted",
+    }
+}
+
+fn base_name(path: &Path) -> &str {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file")
+}
+
+/// A toast failure only costs the notification, so it is logged not raised.
+fn notify_done(job: &Job, output: &Path) {
+    let title = format!("{} {}", past_tense(job.operation), base_name(&job.input));
+    let body = format!("Saved as {}", base_name(output));
+    if let Err(error) = zest_shell::toast::notify(&title, &body) {
+        tracing::warn!("completion toast failed: {error:#}");
+    }
+}
+
+fn notify_error(job: &Job, error: &ConvertError) {
+    let title = format!(
+        "Could not {} {}",
+        past_tense(job.operation).to_lowercase(),
+        base_name(&job.input)
+    );
+    let body = format!("{error} {}", next_step(error));
+    if let Err(e) = zest_shell::toast::notify(&title, &body) {
+        tracing::warn!("error toast failed: {e:#}");
+    }
+}
+
+/// What the user can do next — every error toast ends with one of these
+/// (ROADMAP phase 7: error handling that always says what to do next).
+fn next_step(error: &ConvertError) -> &'static str {
+    match error {
+        ConvertError::FfmpegMissing(_) => {
+            "Reinstall Zest to restore the bundled FFmpeg, or fix its path."
+        }
+        ConvertError::HevcUnsupported => {
+            "HEIC needs HEVC, which Zest cannot decode yet — convert to JPG in Photos first."
+        }
+        ConvertError::NotImplemented(_) => {
+            "That engine is still on the roadmap; nothing is wrong with the file."
+        }
+        ConvertError::Io(_) => "Check the output folder exists and is writable, then retry.",
+        ConvertError::Unsupported(..) => {
+            "That format pair is not on the menu — pick a different target."
+        }
+    }
+}
+
+/// Re-read settings.json and reconcile the HKCU Run key with the checkbox.
+/// Called on launch and whenever the settings window closes.
+fn apply_startup_setting() {
+    let enabled = Settings::load().launch_at_startup;
+    if let Err(error) = zest_shell::startup::set_enabled(enabled) {
+        tracing::warn!(enabled, "could not update the startup Run key: {error:#}");
     }
 }
 
@@ -308,6 +406,7 @@ fn open_settings(startup_notice: Option<String>) {
         if let Err(e) = zest_settings::run_with_notice(settings, startup_notice) {
             tracing::warn!("settings window: {e:#}");
         }
+        apply_startup_setting();
         SETTINGS_OPEN.store(false, Ordering::SeqCst);
     });
 }

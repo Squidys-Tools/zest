@@ -36,6 +36,10 @@ machine whether it is in light or dark mode.
 | Launch at startup | Opt-in, writes HKCU Run key | Off |
 | Update frequency | Daily / weekly / never | Weekly |
 
+The startup checkbox takes effect when the settings window closes and at
+every launch, so a hand-edited `settings.json` reconciles too. Update checks
+run on launch whenever the chosen cadence is due.
+
 ## Colors
 
 The active radial sector is filled with a ramp of 1–3 colors, so you can add or
