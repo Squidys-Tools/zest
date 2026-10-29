@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: windows-latest
+    # A cold gpui build is ~12 min; the rest is headroom for a cold cache.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup is preinstalled on the runner and honours rust-toolchain.toml:
+      # `rustup show` installs the pinned channel with the components the file
+      # lists. The explicit `component add` keeps clippy present even if the
+      # file drifts.
+      - name: Install Rust toolchain
+        run: |
+          rustup show
+          rustup component add clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Lets the media end-to-end test run once that engine lands; the test
+      # self-skips when ffmpeg is absent. choco drops shims into
+      # C:\ProgramData\chocolatey\bin, which is already on PATH; it is echoed
+      # to GITHUB_PATH anyway so a later step cannot lose it.
+      - name: Install FFmpeg
+        run: |
+          choco install ffmpeg -y
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+
+      # Deliberately no `cargo fmt --check`: the tree has unrelated rustfmt
+      # drift, so enforcing it here would fail every PR until a tree-wide
+      # format lands as its own change.
+      - name: clippy + test + build
+        run: pwsh scripts/ci.ps1

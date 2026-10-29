@@ -100,6 +100,26 @@ behind every leaf, and the `Shift+C` ring, falling back to a mock PNG when COM
 has nothing focused. Settings persist to
 `%LOCALAPPDATA%\Zest\settings.json`.
 
+## CI
+
+`.github/workflows/ci.yml` runs one job named `ci` on `windows-latest` for
+every pull request and push to `main`. The job is a thin wrapper around
+`scripts/ci.ps1`, which is the source of truth and runs identically locally:
+
+```powershell
+pwsh scripts/ci.ps1
+```
+
+It runs three steps in order, failing fast on the first failure:
+
+1. `cargo clippy --workspace --all-targets -- -D warnings`
+2. `cargo test --workspace`
+3. `cargo build -p zest-app`
+
+`ci` is the single required status check for merging. `cargo fmt --check` is
+deliberately not enforced yet — the tree has unrelated rustfmt drift, so a
+tree-wide format needs to land as its own change first.
+
 ## Contribution policy
 
 Internal notes under `docs/internals/` record decisions and traps the source
