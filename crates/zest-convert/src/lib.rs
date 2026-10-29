@@ -16,14 +16,19 @@ pub mod text;
 
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use zest_core::{file_kind::classify_path, FileKind, Settings};
+use zest_core::{file_kind::classify_path, FileKind, Settings, VideoPreset};
 
 #[derive(Debug, Error)]
 pub enum ConvertError {
     #[error("unsupported conversion: {0} -> {1}")]
     Unsupported(String, String),
-    #[error("ffmpeg not found at {0}")]
+    /// The payload is a complete, actionable message: where Zest looked and
+    /// what to install to fix it.
+    #[error("{0}")]
     FfmpegMissing(String),
+    /// ffmpeg ran and failed; the payload carries its stderr tail.
+    #[error("ffmpeg could not convert {0}")]
+    FfmpegFailed(String),
     #[error("io: {0}")]
     Io(String),
     #[error("engine not yet implemented (MVP): {0}")]
@@ -66,22 +71,42 @@ pub enum Operation {
     Extract,
 }
 
+/// A codec pick a menu leaf can pin on top of the output container. Only
+/// `mp4-h265` uses it today: the leaf still writes `name.mp4`, with HEVC inside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
 #[derive(Debug, Clone)]
 pub struct Job {
     pub input: PathBuf,
     pub operation: Operation,
     /// Target extension for `Convert`/`Archive` (no dot); unused for `Extract`.
+    /// Codec tokens from the menu (`mp4-h265`) are already normalized away, so
+    /// this is always a real file extension.
     pub output_ext: String,
+    /// Codec pinned by the menu leaf, if any (`mp4-h265` → `Some(Hevc)`).
+    pub codec: Option<VideoCodec>,
     /// Resolved output path (collision-safe). Filled by `dispatch()`.
     pub output: Option<PathBuf>,
 }
 
 impl Job {
     pub fn new(input: &Path, output_ext: &str) -> Self {
+        let ext = output_ext.trim_start_matches('.').to_ascii_lowercase();
+        // `container-codec` menu tokens pin a codec without changing the
+        // extension the file is written with.
+        let (output_ext, codec) = match ext.strip_suffix("-h265") {
+            Some(container) => (container.to_string(), Some(VideoCodec::Hevc)),
+            None => (ext, None),
+        };
         Self {
             input: input.to_path_buf(),
             operation: Operation::Convert,
-            output_ext: output_ext.trim_start_matches('.').to_ascii_lowercase(),
+            output_ext,
+            codec,
             output: None,
         }
     }
@@ -98,9 +123,21 @@ impl Job {
             input: input.to_path_buf(),
             operation: Operation::Extract,
             output_ext: String::new(),
+            codec: None,
             output: None,
         }
     }
+}
+
+/// True when this conversion should log the lossy→lossy warning. The toggle
+/// lives in Settings; a Lossless video preset silences it for real video
+/// targets but never for GIF, which is always a lossy palette encode.
+fn warns_lossy(settings: &Settings, input_ext: &str, output_ext: &str, kind: FileKind) -> bool {
+    settings.warn_lossy_to_lossy
+        && zest_core::file_kind::should_warn_lossy(input_ext, output_ext, kind)
+        && !(kind == FileKind::Video
+            && output_ext != "gif"
+            && settings.video_preset == VideoPreset::Lossless)
 }
 
 /// Route one file to the right engine. Computes the collision-safe sibling
@@ -128,9 +165,7 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
         Operation::Convert => {}
     }
 
-    if settings.warn_lossy_to_lossy
-        && zest_core::file_kind::should_warn_lossy(&input_ext, &job.output_ext, kind)
-    {
+    if warns_lossy(settings, &input_ext, &job.output_ext, kind) {
         tracing::warn!(
             input = %job.input.display(),
             target = %job.output_ext,
@@ -157,6 +192,46 @@ pub async fn dispatch(job: &mut Job, settings: &Settings) -> Result<PathBuf, Con
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_codec_token_normalizes_to_a_real_extension() {
+        let job = Job::new(Path::new("clip.mp4"), "mp4-h265");
+        assert_eq!(job.output_ext, "mp4");
+        assert_eq!(job.codec, Some(VideoCodec::Hevc));
+
+        let job = Job::new(Path::new("clip.mp4"), "MP4");
+        assert_eq!(job.output_ext, "mp4");
+        assert_eq!(job.codec, None);
+    }
+
+    #[test]
+    fn lossy_detection_covers_media_kinds() {
+        let settings = Settings::default();
+        // Every video target is a re-encode, including same-container.
+        assert!(warns_lossy(&settings, "mp4", "webm", FileKind::Video));
+        assert!(warns_lossy(&settings, "mp4", "mp4", FileKind::Video));
+        assert!(warns_lossy(&settings, "mp4", "gif", FileKind::Video));
+        assert!(warns_lossy(&settings, "mp3", "ogg", FileKind::Audio));
+        // WAV is lossless, so WAV -> MP3 is only one-way lossy: no warning.
+        assert!(!warns_lossy(&settings, "wav", "mp3", FileKind::Audio));
+    }
+
+    #[test]
+    fn the_toggle_and_lossless_preset_silence_the_warning() {
+        let off = Settings {
+            warn_lossy_to_lossy: false,
+            ..Settings::default()
+        };
+        assert!(!warns_lossy(&off, "mp3", "ogg", FileKind::Audio));
+
+        let lossless = Settings {
+            video_preset: VideoPreset::Lossless,
+            ..Settings::default()
+        };
+        assert!(!warns_lossy(&lossless, "mp4", "mp4", FileKind::Video));
+        // A palette encode is never lossless, whatever the preset says.
+        assert!(warns_lossy(&lossless, "mp4", "gif", FileKind::Video));
+    }
 
     /// The operation picks the engine; the input kind must not override it.
     #[tokio::test]

@@ -24,8 +24,10 @@ impl FileKind {
             // the actionable "needs HEVC" error rather than "unknown file".
             "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tiff" | "tif" | "webp" | "heic" | "heif"
             | "ico" | "svg" => Self::Image,
-            // Video (FFmpeg)
-            "mp4" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" => Self::Video,
+            // Video (FFmpeg). `mp4-h265` is not a file extension; it is the
+            // menu token for the H.265 MP4 leaf, classified here so the leaf
+            // still picks the film icon.
+            "mp4" | "mp4-h265" | "avi" | "mkv" | "mov" | "wmv" | "flv" | "webm" => Self::Video,
             // Audio (FFmpeg)
             "mp3" | "wav" | "flac" | "aac" | "ogg" | "wma" | "m4a" | "opus" => Self::Audio,
             // Text / data (serde)
@@ -75,8 +77,11 @@ pub fn should_warn_lossy(input_ext: &str, output_ext: &str, kind: FileKind) -> b
         FileKind::Image => lossy_image(&i) && lossy_image(&o),
         FileKind::Audio => lossy_audio(&i) && lossy_audio(&o),
         FileKind::Video => {
-            // MVP: any video→video/gif re-encode is lossy except explicit lossless.
-            i != o || o == "gif"
+            // Every video output is a re-encode (the engine never
+            // stream-copies), so any video target degrades — even
+            // same-container ones like mp4 → mp4. The "except explicit
+            // lossless" half lives in dispatch, which can see the preset.
+            true
         }
         _ => false,
     }
@@ -99,5 +104,15 @@ mod tests {
         assert!(!should_warn_lossy("png", "jpg", FileKind::Image));
         assert!(should_warn_lossy("mp3", "ogg", FileKind::Audio));
         assert!(!should_warn_lossy("wav", "mp3", FileKind::Audio));
+        // Every video target is a re-encode, including same-container.
+        assert!(should_warn_lossy("mp4", "webm", FileKind::Video));
+        assert!(should_warn_lossy("mp4", "mp4", FileKind::Video));
+        assert!(should_warn_lossy("mkv", "gif", FileKind::Video));
+    }
+
+    #[test]
+    fn the_h265_menu_token_classifies_as_video() {
+        // Not a real extension; it exists so the leaf picks the film icon.
+        assert_eq!(FileKind::from_extension("mp4-h265"), FileKind::Video);
     }
 }

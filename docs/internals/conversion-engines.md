@@ -39,14 +39,29 @@ rather than half-doing it.
 
 Bundled FFmpeg as a tokio subprocess. Install path:
 `%LOCALAPPDATA%\Zest\ffmpeg\ffmpeg.exe` (MSI lays it down); dev machines fall
-back to `PATH`.
+back to `PATH`. Neither present → `FfmpegMissing` with an actionable message,
+not a panic.
+
+Argument construction is a pure function (`ffmpeg_args`), so presets, the GIF
+caps, and every audio target are unit-tested without ffmpeg installed. The one
+non-extension target is `mp4-h265`: a menu token `Job::new` splits into
+`mp4` + `VideoCodec::Hevc` before a path is derived. Codec picks: MP4/MKV/MOV/AVI
+→ libx264 (H.265 MP4 → libx265, `hvc1` tag), WebM → libvpx-vp9; audio in the
+container is AAC except WebM (libopus) and AVI (libmp3lame, for old-player
+compat). Presets map to per-codec CRF + speed; Lossless is real lossless —
+x264 `-crf 0`, x265 `-x265-params lossless=1`, VP9 `-lossless 1`.
 
 Video-to-GIF is special-cased with resolution and framerate caps
-(`GIF_MAX_WIDTH = 480`, `GIF_MAX_FPS = 15`). Without caps a GIF easily reaches
+(`GIF_MAX_WIDTH = 480`, `GIF_MAX_FPS = 15`) via the
+palettegen/paletteuse filter graph — not the naive encoder — and the width is
+a ceiling (`min(480,iw)`), not an upscale. Without caps a GIF easily reaches
 hundreds of megabytes.
 
 Quality wiring: video preset (low/medium/high/lossless) maps to FFmpeg args;
-audio bitrate maps to `-b:a`. JPEG-style sliders do not apply here.
+audio bitrate maps to `-b:a` on lossy codecs only (PCM/FLAC take none).
+JPEG-style sliders do not apply here. The lossy→lossy predicate warns on every
+video re-encode — even same-container — and dispatch silences it when the
+Lossless preset applies (never for GIF).
 
 ## Text (`convert::text`)
 
