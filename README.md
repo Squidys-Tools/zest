@@ -5,8 +5,9 @@ radial menu with only the conversions / archive actions that make sense.
 
 > Status: the selection resolver (Phase 0), the tray, hotkeys, and the whole
 > Phase 2 ring — sectors, ring-1 filtering, ring-2 fan-out, leaf dispatch,
-> pre-created window — are in place, as is the image conversion engine and a
-> gpui settings window. Media, text, and archive conversion are still stubbed,
+> pre-created window — are in place, as are the image and text conversion
+> engines and a gpui settings window. Media and archive conversion are still
+> stubbed,
 > with the remaining work in dependency order under `docs/ROADMAP.md`.
 > See `docs/ARCHITECTURE.md`.
 

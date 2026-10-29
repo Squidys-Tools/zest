@@ -6,8 +6,8 @@
 //! - archive: pure-Rust `zip`/`tar`/`flate2` for MVP (zip/tar/tar.gz/gzip
 //!   create+extract); libarchive swap is a later option if needed.
 //!
-//! MVP order: images → media → archives → text. Media, archive, and text
-//! still validate and stub; the image engine is live (SQU-40).
+//! MVP order: images → media → archives → text. Media and archive still
+//! validate and stub; the image and text engines are live (SQU-40, SQU-51).
 
 pub mod archive;
 pub mod image;
