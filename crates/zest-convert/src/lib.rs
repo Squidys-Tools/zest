@@ -6,8 +6,8 @@
 //! - archive: pure-Rust `zip`/`tar`/`flate2` for MVP (zip/tar/tar.gz/gzip
 //!   create+extract); libarchive swap is a later option if needed.
 //!
-//! MVP order: images → media → archives → text. Media and archive still
-//! validate and stub; the image and text engines are live (SQU-40, SQU-51).
+//! MVP order: images → media → archives → text. All four engines are live
+//! (SQU-40, SQU-49, SQU-51 and the FFmpeg media engine).
 
 pub mod archive;
 pub mod image;
@@ -82,6 +82,8 @@ pub enum VideoCodec {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub input: PathBuf,
+    /// Further paths packed into the same archive as `input` (`Archive` only).
+    pub more_inputs: Vec<PathBuf>,
     pub operation: Operation,
     /// Target extension for `Convert`/`Archive` (no dot); unused for `Extract`.
     /// Codec tokens from the menu (`mp4-h265`) are already normalized away, so
@@ -104,6 +106,7 @@ impl Job {
         };
         Self {
             input: input.to_path_buf(),
+            more_inputs: Vec::new(),
             operation: Operation::Convert,
             output_ext,
             codec,
@@ -118,9 +121,18 @@ impl Job {
         }
     }
 
+    /// One archive holding every path in `inputs` (which must not be empty).
+    pub fn archive_many(inputs: &[PathBuf], output_ext: &str) -> Self {
+        Self {
+            more_inputs: inputs[1..].to_vec(),
+            ..Self::archive(&inputs[0], output_ext)
+        }
+    }
+
     pub fn extract(input: &Path) -> Self {
         Self {
             input: input.to_path_buf(),
+            more_inputs: Vec::new(),
             operation: Operation::Extract,
             output_ext: String::new(),
             codec: None,
@@ -239,10 +251,10 @@ mod tests {
         let mut job = Job::archive(Path::new("photo.png"), "zip");
         let error = dispatch(&mut job, &Settings::default())
             .await
-            .expect_err("archive engine is still a stub");
+            .expect_err("the input does not exist, so the engine cannot pack it");
         assert!(
-            error.to_string().contains("archive engine"),
-            "unexpected error: {error}"
+            matches!(error, ConvertError::Io(_)),
+            "the archive engine should have run and failed on the missing input: {error}"
         );
     }
 
@@ -286,10 +298,10 @@ mod tests {
         let mut job = Job::extract(Path::new("bundle.zip"));
         let error = dispatch(&mut job, &Settings::default())
             .await
-            .expect_err("extraction engine is still a stub");
+            .expect_err("the archive does not exist, so it cannot be read");
         assert!(
-            error.to_string().contains("archive extraction"),
-            "unexpected error: {error}"
+            matches!(error, ConvertError::Io(_)),
+            "the extract path should have run and failed on the missing input: {error}"
         );
     }
 }

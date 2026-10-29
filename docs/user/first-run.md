@@ -20,7 +20,7 @@ hotkey, flick toward the action you want.
 | Selection | Ring 1 |
 | --- | --- |
 | Single PNG (or other convertible file) | Convert, Archive |
-| Single `.zip` / `.tar` / `.tar.gz` / `.gzip` | Extract |
+| Single `.zip` / `.tar` / `.tar.gz` / `.gz` | Extract |
 | Mixed file types, or folders | Archive only |
 | Virtual folders (Recycle Bin, This PC) | Nothing; the menu does not open |
 

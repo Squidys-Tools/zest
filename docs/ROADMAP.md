@@ -78,9 +78,9 @@ Exit: MP4 → GIF/WebM and MP3 → OGG work from the menu with sane sizes.
 
 ## Phase 5 — Archives
 
-- [ ] Create zip / tar / tar.gz / gzip from files + folders.
-- [ ] Extract the same set next to the archive.
-- [ ] (MVP uses pure-Rust `zip`/`tar`/`flate2`; libarchive swap only if
+- [x] Create zip / tar / tar.gz / gzip from files + folders.
+- [x] Extract the same set next to the archive.
+- [x] (MVP uses pure-Rust `zip`/`tar`/`flate2`; libarchive swap only if
       coverage demands it.)
 
 Exit: mixed selection → zip; zip → Extract restores contents.
