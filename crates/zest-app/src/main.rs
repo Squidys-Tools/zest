@@ -129,26 +129,27 @@ async fn main() -> anyhow::Result<()> {
         open_settings(Some(notice));
     }
 
-    match zest_shell::updater::check_for_updates(
-        settings.update_frequency,
-        env!("CARGO_PKG_VERSION"),
-    )
-    .await
-    {
-        Ok(Some(version)) => {
-            tracing::info!(version = %version, "update available");
-            if let Err(error) = zest_shell::toast::notify(
-                "Zest update available",
-                &format!(
-                    "Version {version} is on GitHub Releases. Pick “Update” from the tray menu to download it."
-                ),
-            ) {
-                tracing::warn!("update toast failed: {error:#}");
+    // Off the startup path: a slow network must not leave the hotkeys dead.
+    let update_frequency = settings.update_frequency;
+    tokio::spawn(async move {
+        match zest_shell::updater::check_for_updates(update_frequency, env!("CARGO_PKG_VERSION"))
+            .await
+        {
+            Ok(Some(version)) => {
+                tracing::info!(version = %version, "update available");
+                if let Err(error) = zest_shell::toast::notify(
+                    "Zest update available",
+                    &format!(
+                        "Version {version} is on GitHub Releases. Pick “Update” from the tray menu to download it."
+                    ),
+                ) {
+                    tracing::warn!("update toast failed: {error:#}");
+                }
             }
+            Ok(None) => tracing::debug!("up to date"),
+            Err(error) => tracing::warn!("update check failed: {error:#}"),
         }
-        Ok(None) => tracing::debug!("up to date"),
-        Err(error) => tracing::warn!("update check failed: {error:#}"),
-    }
+    });
 
     tracing::info!("zest running");
     // The selection the visible menu was built from. The overlay never takes
