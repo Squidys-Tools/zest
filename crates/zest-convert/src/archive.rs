@@ -34,21 +34,23 @@ pub async fn convert_or_extract(
             job.output_ext.clone(),
         ));
     }
-    if ext == "gzip" && job.input.is_dir() {
-        return Err(ConvertError::Io(format!(
-            "gzip compresses a single file; {} is a folder — pick zip, tar, or tar.gz instead",
-            job.input.display()
-        )));
+    let inputs: Vec<PathBuf> = std::iter::once(job.input.clone())
+        .chain(job.more_inputs.iter().cloned())
+        .collect();
+    if ext == "gzip" && (inputs.len() > 1 || job.input.is_dir()) {
+        return Err(ConvertError::Io(
+            "gzip compresses a single file; pick zip, tar, or tar.gz for folders or several files"
+                .to_string(),
+        ));
     }
 
-    let output = create_output_path(&job.input, ext, &settings.output)?;
+    let output = create_output_path(&inputs, ext, &settings.output)?;
     ensure_parent_dir(&output)?;
 
-    let input = job.input.clone();
     let target = output.clone();
     let ext = ext.to_string();
     // Packing is IO + CPU bound; keep it off the async worker.
-    tokio::task::spawn_blocking(move || create(&input, &target, &ext))
+    tokio::task::spawn_blocking(move || create(&inputs, &target, &ext))
         .await
         .map_err(|e| ConvertError::Io(format!("archive worker failed: {e}")))??;
     Ok(output)
@@ -67,20 +69,26 @@ pub async fn extract(job: &Job, _settings: &Settings) -> Result<std::path::PathB
 
 /// Where a created archive lands, honouring the configured output location.
 fn create_output_path(
-    input: &Path,
+    inputs: &[PathBuf],
     ext: &str,
     location: &OutputLocation,
 ) -> Result<PathBuf, ConvertError> {
+    let input = &inputs[0];
+    let beside = input.parent().unwrap_or_else(|| Path::new("."));
+    let parent = match location {
+        OutputLocation::Folder(folder) => folder.clone(),
+        OutputLocation::BesideOriginal | OutputLocation::AskEachTime => beside.to_path_buf(),
+    };
     if ext == "gzip" {
-        let stem = file_name(input)?;
-        let parent = match location {
-            OutputLocation::Folder(folder) => folder.clone(),
-            OutputLocation::BesideOriginal | OutputLocation::AskEachTime => input
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
-        };
-        return Ok(unique_file(&parent, &format!("{stem}.gz")));
+        return Ok(unique_file(&parent, &format!("{}.gz", file_name(input)?)));
+    }
+    if inputs.len() > 1 {
+        // Several files share no stem; name the archive after their folder.
+        let name = beside
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Archive");
+        return Ok(unique_file(&parent, &format!("{name}.{ext}")));
     }
     Ok(output_path_for(input, ext, location))
 }
@@ -120,15 +128,18 @@ fn io(context: &str, path: &Path, error: impl std::fmt::Display) -> ConvertError
 // ---------------------------------------------------------------------------
 // Create
 
-fn create(input: &Path, output: &Path, ext: &str) -> Result<(), ConvertError> {
-    if !input.exists() {
-        return Err(ConvertError::Io(format!("cannot read {}", input.display())));
+fn create(inputs: &[PathBuf], output: &Path, ext: &str) -> Result<(), ConvertError> {
+    if let Some(missing) = inputs.iter().find(|input| !input.exists()) {
+        return Err(ConvertError::Io(format!(
+            "cannot read {}",
+            missing.display()
+        )));
     }
     match ext {
-        "zip" => create_zip(input, output),
+        "zip" => create_zip(inputs, output),
         "tar" => {
             let file = create_file(output)?;
-            let mut writer = create_tar(input, std::io::BufWriter::new(file))?;
+            let mut writer = create_tar(inputs, std::io::BufWriter::new(file))?;
             writer.flush().map_err(|e| io("cannot finish", output, e))
         }
         "tar.gz" => {
@@ -139,13 +150,13 @@ fn create(input: &Path, output: &Path, ext: &str) -> Result<(), ConvertError> {
             );
             // `into_inner` writes the tar end-of-archive blocks; the gzip
             // trailer needs an explicit finish of its own.
-            let encoder = create_tar(input, encoder)?;
+            let encoder = create_tar(inputs, encoder)?;
             let mut writer = encoder
                 .finish()
                 .map_err(|e| io("cannot finish", output, e))?;
             writer.flush().map_err(|e| io("cannot finish", output, e))
         }
-        "gzip" => create_gzip(input, output),
+        "gzip" => create_gzip(&inputs[0], output),
         other => Err(ConvertError::Unsupported(
             "archive".to_string(),
             other.to_string(),
@@ -157,15 +168,17 @@ fn create_file(output: &Path) -> Result<std::fs::File, ConvertError> {
     std::fs::File::create(output).map_err(|e| io("cannot write", output, e))
 }
 
-fn create_zip(input: &Path, output: &Path) -> Result<(), ConvertError> {
+fn create_zip(inputs: &[PathBuf], output: &Path) -> Result<(), ConvertError> {
     let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(create_file(output)?));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
-    let name = file_name(input)?;
-    if input.is_dir() {
-        zip_add_dir(&mut zip, input, &name, options)?;
-    } else {
-        zip_add_file(&mut zip, input, &name, options)?;
+    for input in inputs {
+        let name = file_name(input)?;
+        if input.is_dir() {
+            zip_add_dir(&mut zip, input, &name, options)?;
+        } else {
+            zip_add_file(&mut zip, input, &name, options)?;
+        }
     }
     let mut writer = zip.finish().map_err(|e| io("cannot finish", output, e))?;
     writer.flush().map_err(|e| io("cannot finish", output, e))
@@ -216,25 +229,27 @@ fn zip_add_file<W: Write + Seek>(
     Ok(())
 }
 
-/// Append `input` under its own name and return the finished writer so the
-/// caller can flush whatever it wraps (gzip encoder, buffer).
-fn create_tar<W: Write>(input: &Path, writer: W) -> Result<W, ConvertError> {
+/// Append each input under its own name and return the finished writer so
+/// the caller can flush whatever it wraps (gzip encoder, buffer).
+fn create_tar<W: Write>(inputs: &[PathBuf], writer: W) -> Result<W, ConvertError> {
     let mut builder = tar::Builder::new(writer);
-    let name = file_name(input)?;
-    if input.is_dir() {
-        // Recursive: the directory itself plus every entry under it,
-        // including empty folders.
-        builder
-            .append_dir_all(&name, input)
-            .map_err(|e| io("cannot add", input, e))?;
-    } else {
-        builder
-            .append_path_with_name(input, &name)
-            .map_err(|e| io("cannot add", input, e))?;
+    for input in inputs {
+        let name = file_name(input)?;
+        if input.is_dir() {
+            // Recursive: the directory itself plus every entry under it,
+            // including empty folders.
+            builder
+                .append_dir_all(&name, input)
+                .map_err(|e| io("cannot add", input, e))?;
+        } else {
+            builder
+                .append_path_with_name(input, &name)
+                .map_err(|e| io("cannot add", input, e))?;
+        }
     }
     builder
         .into_inner()
-        .map_err(|e| io("cannot finish", input, e))
+        .map_err(|e| io("cannot finish", &inputs[0], e))
 }
 
 fn create_gzip(input: &Path, output: &Path) -> Result<(), ConvertError> {
@@ -706,6 +721,61 @@ mod tests {
             decoy,
             "the existing archive was overwritten"
         );
+    }
+
+    #[tokio::test]
+    async fn a_mixed_selection_becomes_one_archive_that_extracts_back() {
+        let scratch = Scratch::new("mixed");
+        let dir = scratch.join("docs");
+        std::fs::create_dir(&dir).expect("mkdir");
+        std::fs::write(dir.join("inner.txt"), "inner").expect("write inner");
+        let file = scratch.join("note.txt");
+        std::fs::write(&file, "note").expect("write note");
+
+        for ext in ["zip", "tar", "tar.gz"] {
+            let mut job = Job::archive_many(&[file.clone(), dir.clone()], ext);
+            let archive = crate::dispatch(&mut job, &Settings::default())
+                .await
+                .expect("one archive for the selection");
+            let shared_folder = scratch.0.file_name().unwrap().to_str().unwrap();
+            assert!(
+                archive
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .starts_with(shared_folder),
+                "named after the shared folder: {}",
+                archive.display()
+            );
+
+            let mut job = Job::extract(&archive);
+            let out = crate::dispatch(&mut job, &Settings::default())
+                .await
+                .expect("extract");
+            assert_eq!(
+                std::fs::read_to_string(out.join("note.txt")).unwrap(),
+                "note"
+            );
+            assert_eq!(
+                std::fs::read_to_string(out.join("docs").join("inner.txt")).unwrap(),
+                "inner"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gzip_refuses_a_multi_file_selection() {
+        let scratch = Scratch::new("gzip-many");
+        let a = scratch.join("a.txt");
+        let b = scratch.join("b.txt");
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        let mut job = Job::archive_many(&[a, b], "gzip");
+        let error = crate::dispatch(&mut job, &Settings::default())
+            .await
+            .expect_err("gzip is single-file");
+        assert!(error.to_string().contains("single file"), "{error}");
     }
 
     #[tokio::test]

@@ -82,6 +82,8 @@ pub enum VideoCodec {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub input: PathBuf,
+    /// Further paths packed into the same archive as `input` (`Archive` only).
+    pub more_inputs: Vec<PathBuf>,
     pub operation: Operation,
     /// Target extension for `Convert`/`Archive` (no dot); unused for `Extract`.
     /// Codec tokens from the menu (`mp4-h265`) are already normalized away, so
@@ -104,6 +106,7 @@ impl Job {
         };
         Self {
             input: input.to_path_buf(),
+            more_inputs: Vec::new(),
             operation: Operation::Convert,
             output_ext,
             codec,
@@ -118,9 +121,18 @@ impl Job {
         }
     }
 
+    /// One archive holding every path in `inputs` (which must not be empty).
+    pub fn archive_many(inputs: &[PathBuf], output_ext: &str) -> Self {
+        Self {
+            more_inputs: inputs[1..].to_vec(),
+            ..Self::archive(&inputs[0], output_ext)
+        }
+    }
+
     pub fn extract(input: &Path) -> Self {
         Self {
             input: input.to_path_buf(),
+            more_inputs: Vec::new(),
             operation: Operation::Extract,
             output_ext: String::new(),
             codec: None,

@@ -14,10 +14,13 @@ Select files and/or folders, open the menu, pick **Archive**, then choose:
 | `.tar.gz` | Compressed bundle |
 | `.gz` | Single-file compression: `photo.png` becomes `photo.png.gz` |
 
-Each selected item becomes its own archive: a folder packs with its contents
-under its own name, a file under its file name. Archives land beside the
-original (or in your configured output folder) and never overwrite an
-existing file — a `name (1)` suffix is added instead.
+The whole selection becomes one archive: a folder packs with its contents
+under its own name, a file under its file name. A single item names the
+archive after itself; several items name it after the folder they sit in. `.gz`
+compresses one file only, so picking it for a folder or several files stops
+with a message to choose another format.
+Archives land beside the original (or in your configured output folder) and
+never overwrite an existing file — a `name (1)` suffix is added instead.
 
 ## Extract
 

@@ -303,10 +303,20 @@ fn resolve_now() -> Result<Selection, ()> {
 
 async fn run_action(choice: &MenuAction, selection: &Selection) {
     let settings = Settings::load();
+    // One archive for the whole selection, not one per file.
+    if let MenuAction::Archive { ext } = choice {
+        let mut job = Job::archive_many(&selection.files, ext);
+        tracing::info!(files = selection.files.len(), ext = %job.output_ext, "running archive action");
+        match zest_convert::dispatch(&mut job, &settings).await {
+            Ok(output) => tracing::info!(output = %output.display(), "done"),
+            Err(error) => tracing::warn!("failed: {error}"),
+        }
+        return;
+    }
     for input in &selection.files {
         let mut job = match choice {
             MenuAction::Convert { ext } => Job::new(input, ext),
-            MenuAction::Archive { ext } => Job::archive(input, ext),
+            MenuAction::Archive { .. } => unreachable!("handled above"),
             MenuAction::Extract => Job::extract(input),
         };
         tracing::info!(
