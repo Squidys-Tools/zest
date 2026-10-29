@@ -664,13 +664,12 @@ mod tests {
         );
 
         let csv_out = run(&json, "csv").await.expect("json -> csv");
-        // serde_json::Value sorts object keys, so the header comes back in
-        // sorted order even though the source listed name first.
+        // serde_json's preserve_order feature keeps the source's column order.
         assert_eq!(
             std::fs::read_to_string(&csv_out)
                 .unwrap()
                 .replace("\r\n", "\n"),
-            "age,name\n36,ada\n85,grace\n"
+            "name,age\nada,36\ngrace,85\n"
         );
     }
 
