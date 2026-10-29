@@ -372,6 +372,9 @@ fn next_step(error: &ConvertError) -> &'static str {
         ConvertError::FfmpegMissing(_) => {
             "Reinstall Zest to restore the bundled FFmpeg, or fix its path."
         }
+        ConvertError::FfmpegFailed(_) => {
+            "Check that the file plays in another app, then retry; the log has FFmpeg's message."
+        }
         ConvertError::HevcUnsupported => {
             "HEIC needs HEVC, which Zest cannot decode yet — convert to JPG in Photos first."
         }
